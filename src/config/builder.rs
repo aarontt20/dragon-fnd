@@ -1,21 +1,16 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::de::DeserializeOwned;
 
-use super::env::load_env_vars;
+use super::env::EnvSource;
+use super::file::FileSource;
 use super::resolve::resolve_references;
+use super::source::{merge_at_path, ConfigSource};
 use super::ConfigError;
 
-/// A configuration source in the loading pipeline.
-#[derive(Debug)]
-enum ConfigSource {
-    File { path: PathBuf, required: bool },
-    Env { prefix: String, separator: String },
-}
-
-/// Builder for loading configuration from multiple TOML files.
+/// Builder for loading configuration from multiple sources.
 ///
-/// Files are merged in registration order, with later files overriding
+/// Sources are merged in registration order, with later sources overriding
 /// earlier ones. Nested tables are merged recursively; other values
 /// (including arrays) are replaced entirely.
 ///
@@ -50,10 +45,10 @@ enum ConfigSource {
 ///     .build()?;
 /// # Ok::<(), dragon_fnd::ConfigError>(())
 /// ```
-#[derive(Debug, Default)]
+#[derive(Default)]
 #[must_use = "builders do nothing until .build() is called"]
 pub struct Config {
-    sources: Vec<ConfigSource>,
+    sources: Vec<Box<dyn ConfigSource>>,
 }
 
 impl Config {
@@ -68,12 +63,8 @@ impl Config {
     /// Optional files that are missing are silently skipped.
     ///
     /// Sources are applied in registration order, so later sources override earlier ones.
-    pub fn with_file(mut self, path: impl AsRef<Path>, required: bool) -> Self {
-        self.sources.push(ConfigSource::File {
-            path: path.as_ref().to_path_buf(),
-            required,
-        });
-        self
+    pub fn with_file(self, path: impl AsRef<Path>, required: bool) -> Self {
+        self.with_source(FileSource::new(path, required))
     }
 
     /// Loads configuration from environment variables with the given prefix.
@@ -125,11 +116,36 @@ impl Config {
     ///     .build()?;
     /// # Ok::<(), dragon_fnd::ConfigError>(())
     /// ```
-    pub fn with_env(mut self, prefix: impl Into<String>, separator: impl Into<String>) -> Self {
-        self.sources.push(ConfigSource::Env {
-            prefix: prefix.into(),
-            separator: separator.into(),
-        });
+    pub fn with_env(self, prefix: impl Into<String>, separator: impl Into<String>) -> Self {
+        self.with_source(EnvSource::new(prefix, separator))
+    }
+
+    /// Adds a custom configuration source.
+    ///
+    /// This enables extension with custom source types (CLI args, remote config, etc.)
+    /// by implementing the [`ConfigSource`] trait.
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// use dragon_fnd::config::{ConfigSource, ConfigEntry, ConfigError};
+    ///
+    /// struct MyCustomSource { /* ... */ }
+    ///
+    /// impl ConfigSource for MyCustomSource {
+    ///     fn entries(&self) -> Result<Vec<ConfigEntry>, ConfigError> {
+    ///         // Return configuration entries
+    ///         Ok(vec![])
+    ///     }
+    /// }
+    ///
+    /// let config: MyConfig = Config::builder()
+    ///     .with_file("defaults.toml", true)
+    ///     .with_source(MyCustomSource::new())
+    ///     .build()?;
+    /// ```
+    pub fn with_source(mut self, source: impl ConfigSource + 'static) -> Self {
+        self.sources.push(Box::new(source));
         self
     }
 
@@ -141,15 +157,9 @@ impl Config {
         let mut merged = toml::Table::new();
 
         for source in self.sources {
-            match source {
-                ConfigSource::File { path, required } => {
-                    if let Some(table) = load_config_file(&path, required)? {
-                        deep_merge(&mut merged, table);
-                    }
-                }
-                ConfigSource::Env { prefix, separator } => {
-                    load_env_vars(&mut merged, &prefix, &separator);
-                }
+            let entries = source.entries()?;
+            for entry in entries {
+                merge_at_path(&mut merged, &entry.path, entry.value);
             }
         }
 
@@ -162,41 +172,11 @@ impl Config {
     }
 }
 
-/// Loads and parses a TOML config file.
-///
-/// Returns `Ok(None)` if the file doesn't exist and `required` is false.
-fn load_config_file(path: &Path, required: bool) -> Result<Option<toml::Table>, ConfigError> {
-    match std::fs::read_to_string(path) {
-        Ok(contents) => {
-            let table = toml::from_str(&contents).map_err(|e| ConfigError::ParseError {
-                path: path.to_path_buf(),
-                source: e,
-            })?;
-            Ok(Some(table))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if required {
-                Err(ConfigError::FileNotFound(path.to_path_buf()))
-            } else {
-                Ok(None)
-            }
-        }
-        Err(e) => Err(ConfigError::ReadError {
-            path: path.to_path_buf(),
-            source: e,
-        }),
-    }
-}
-
-fn deep_merge(base: &mut toml::Table, overlay: toml::Table) {
-    for (key, value) in overlay {
-        match (base.get_mut(&key), value) {
-            (Some(toml::Value::Table(base_table)), toml::Value::Table(overlay_table)) => {
-                deep_merge(base_table, overlay_table);
-            }
-            (_, value) => {
-                base.insert(key, value);
-            }
-        }
+// Implement Debug manually since Box<dyn ConfigSource> doesn't implement Debug
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("sources", &format!("[{} sources]", self.sources.len()))
+            .finish()
     }
 }

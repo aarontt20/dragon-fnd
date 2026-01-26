@@ -1,63 +1,69 @@
-//! Environment variable loading for configuration.
+//! Environment variable configuration source.
 
-use toml::{Table, Value};
+use toml::Value;
 
-/// Loads environment variables with the given prefix and merges them into the config table.
+use super::source::{ConfigEntry, ConfigSource};
+use super::ConfigError;
+
+/// A configuration source that loads from environment variables.
 ///
 /// Environment variables are mapped to config paths by:
-/// 1. Removing the prefix
-/// 2. Splitting on the separator
+/// 1. Removing the prefix and separator
+/// 2. Splitting remaining segments on the separator
 /// 3. Converting path segments to lowercase
 ///
 /// For example, with prefix `"APP"` and separator `"__"`:
-/// - `APP__DATABASE__HOST=localhost` → `database.host = "localhost"`
-/// - `APP__SERVER__PORT=8080` → `server.port = 8080`
+/// - `APP__DATABASE__HOST=localhost` -> `["database", "host"]` = "localhost"
+/// - `APP__SERVER__PORT=8080` -> `["server", "port"]` = 8080
 ///
 /// Values are coerced from strings to the most specific type:
 /// - Integer (if all digits with optional leading `-`)
 /// - Float (if contains `.` and parses successfully)
 /// - Boolean (`true`/`false`, case-insensitive)
 /// - String (fallback)
-pub fn load_env_vars(table: &mut Table, prefix: &str, separator: &str) {
-    let prefix_with_sep = format!("{prefix}{separator}");
+#[derive(Debug, Clone)]
+pub struct EnvSource {
+    prefix: String,
+    separator: String,
+}
 
-    for (key, value) in std::env::vars() {
-        if let Some(path_str) = key.strip_prefix(&prefix_with_sep) {
-            if path_str.is_empty() {
-                continue;
-            }
-
-            let path: Vec<&str> = path_str.split(separator).collect();
-            let coerced_value = coerce_value(&value);
-
-            insert_at_path(table, &path, coerced_value);
+impl EnvSource {
+    /// Creates a new environment variable source.
+    ///
+    /// # Arguments
+    ///
+    /// * `prefix` - The prefix that identifies relevant env vars (e.g., "MYAPP")
+    /// * `separator` - The separator between path segments (e.g., "__")
+    pub fn new(prefix: impl Into<String>, separator: impl Into<String>) -> Self {
+        Self {
+            prefix: prefix.into(),
+            separator: separator.into(),
         }
     }
 }
 
-/// Inserts a value at the given path, creating intermediate tables as needed.
-fn insert_at_path(table: &mut Table, path: &[&str], value: Value) {
-    let Some((first, rest)) = path.split_first() else {
-        return;
-    };
+impl ConfigSource for EnvSource {
+    fn entries(&self) -> Result<Vec<ConfigEntry>, ConfigError> {
+        let prefix_with_sep = format!("{}{}", self.prefix, self.separator);
+        let mut entries = Vec::new();
 
-    let key = first.to_lowercase();
+        for (key, value) in std::env::vars() {
+            if let Some(path_str) = key.strip_prefix(&prefix_with_sep) {
+                if path_str.is_empty() {
+                    continue;
+                }
 
-    if rest.is_empty() {
-        table.insert(key, value);
-        return;
-    }
+                let path: Vec<String> = path_str
+                    .split(&self.separator)
+                    .map(|s| s.to_lowercase())
+                    .collect();
 
-    // Ensure intermediate table exists (replace non-table values if needed)
-    match table.get(&key) {
-        Some(Value::Table(_)) => {}
-        _ => {
-            table.insert(key.clone(), Value::Table(Table::new()));
+                let coerced_value = coerce_value(&value);
+                entries.push(ConfigEntry::at_path(path, coerced_value));
+            }
         }
-    }
 
-    if let Some(Value::Table(nested)) = table.get_mut(&key) {
-        insert_at_path(nested, rest, value);
+        Ok(entries)
     }
 }
 
@@ -171,148 +177,111 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_at_path_simple() {
-        let mut table = Table::new();
-        insert_at_path(&mut table, &["HOST"], Value::String("localhost".to_string()));
+    fn test_env_source_basic() {
+        let mut guard = EnvGuard::new();
+        guard.set("TESTAPP2__HOST", "localhost");
+        guard.set("TESTAPP2__PORT", "8080");
+
+        let source = EnvSource::new("TESTAPP2", "__");
+        let entries = source.entries().unwrap();
+
+        // Find the entries we care about
+        let host_entry = entries.iter().find(|e| e.path == vec!["host"]);
+        let port_entry = entries.iter().find(|e| e.path == vec!["port"]);
 
         assert_eq!(
-            table.get("host"),
+            host_entry.map(|e| &e.value),
             Some(&Value::String("localhost".to_string()))
         );
+        assert_eq!(port_entry.map(|e| &e.value), Some(&Value::Integer(8080)));
     }
 
     #[test]
-    fn test_insert_at_path_nested() {
-        let mut table = Table::new();
-        insert_at_path(
-            &mut table,
-            &["DATABASE", "HOST"],
-            Value::String("localhost".to_string()),
-        );
-
-        let db = table.get("database").unwrap().as_table().unwrap();
-        assert_eq!(db.get("host"), Some(&Value::String("localhost".to_string())));
-    }
-
-    #[test]
-    fn test_insert_at_path_deeply_nested() {
-        let mut table = Table::new();
-        insert_at_path(
-            &mut table,
-            &["A", "B", "C", "D"],
-            Value::Integer(42),
-        );
-
-        let a = table.get("a").unwrap().as_table().unwrap();
-        let b = a.get("b").unwrap().as_table().unwrap();
-        let c = b.get("c").unwrap().as_table().unwrap();
-        assert_eq!(c.get("d"), Some(&Value::Integer(42)));
-    }
-
-    #[test]
-    fn test_load_env_vars_basic() {
+    fn test_env_source_nested() {
         let mut guard = EnvGuard::new();
-        guard.set("TESTAPP__HOST", "localhost");
-        guard.set("TESTAPP__PORT", "8080");
+        guard.set("MYAPP2__DATABASE__HOST", "db.example.com");
+        guard.set("MYAPP2__DATABASE__PORT", "5432");
+        guard.set("MYAPP2__SERVER__ENABLED", "true");
 
-        let mut table = Table::new();
-        load_env_vars(&mut table, "TESTAPP", "__");
+        let source = EnvSource::new("MYAPP2", "__");
+        let entries = source.entries().unwrap();
+
+        let db_host = entries
+            .iter()
+            .find(|e| e.path == vec!["database", "host"]);
+        let db_port = entries
+            .iter()
+            .find(|e| e.path == vec!["database", "port"]);
+        let srv_enabled = entries
+            .iter()
+            .find(|e| e.path == vec!["server", "enabled"]);
 
         assert_eq!(
-            table.get("host"),
-            Some(&Value::String("localhost".to_string()))
-        );
-        assert_eq!(table.get("port"), Some(&Value::Integer(8080)));
-    }
-
-    #[test]
-    fn test_load_env_vars_nested() {
-        let mut guard = EnvGuard::new();
-        guard.set("MYAPP__DATABASE__HOST", "db.example.com");
-        guard.set("MYAPP__DATABASE__PORT", "5432");
-        guard.set("MYAPP__SERVER__ENABLED", "true");
-
-        let mut table = Table::new();
-        load_env_vars(&mut table, "MYAPP", "__");
-
-        let db = table.get("database").unwrap().as_table().unwrap();
-        assert_eq!(
-            db.get("host"),
+            db_host.map(|e| &e.value),
             Some(&Value::String("db.example.com".to_string()))
         );
-        assert_eq!(db.get("port"), Some(&Value::Integer(5432)));
-
-        let server = table.get("server").unwrap().as_table().unwrap();
-        assert_eq!(server.get("enabled"), Some(&Value::Boolean(true)));
+        assert_eq!(db_port.map(|e| &e.value), Some(&Value::Integer(5432)));
+        assert_eq!(srv_enabled.map(|e| &e.value), Some(&Value::Boolean(true)));
     }
 
     #[test]
-    fn test_load_env_vars_case_conversion() {
+    fn test_env_source_case_conversion() {
         let mut guard = EnvGuard::new();
-        guard.set("APP__UPPER_CASE__NESTED_KEY", "value");
+        guard.set("APP2__UPPER_CASE__NESTED_KEY", "value");
 
-        let mut table = Table::new();
-        load_env_vars(&mut table, "APP", "__");
+        let source = EnvSource::new("APP2", "__");
+        let entries = source.entries().unwrap();
 
-        // Keys should be lowercase
-        let upper = table.get("upper_case").unwrap().as_table().unwrap();
+        let entry = entries
+            .iter()
+            .find(|e| e.path == vec!["upper_case", "nested_key"]);
+
         assert_eq!(
-            upper.get("nested_key"),
+            entry.map(|e| &e.value),
             Some(&Value::String("value".to_string()))
         );
     }
 
     #[test]
-    fn test_load_env_vars_ignores_unrelated() {
+    fn test_env_source_ignores_unrelated() {
         let mut guard = EnvGuard::new();
-        guard.set("APP__KEY", "value");
-        guard.set("OTHER__KEY", "ignored");
-        guard.set("APPEXTRA__KEY", "also_ignored");
+        guard.set("APP3__KEY", "value");
+        guard.set("OTHER3__KEY", "ignored");
+        guard.set("APP3EXTRA__KEY", "also_ignored");
 
-        let mut table = Table::new();
-        load_env_vars(&mut table, "APP", "__");
+        let source = EnvSource::new("APP3", "__");
+        let entries = source.entries().unwrap();
 
-        assert_eq!(table.get("key"), Some(&Value::String("value".to_string())));
-        assert!(table.get("other").is_none());
-        // APPEXTRA doesn't match because prefix requires separator after it
+        // Should only have the APP3__KEY entry
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, vec!["key"]);
     }
 
     #[test]
-    fn test_load_env_vars_empty_path_ignored() {
+    fn test_env_source_empty_path_ignored() {
         let mut guard = EnvGuard::new();
         // Just the prefix with separator but no path
-        guard.set("APP__", "value");
+        guard.set("APP4__", "value");
 
-        let mut table = Table::new();
-        load_env_vars(&mut table, "APP", "__");
+        let source = EnvSource::new("APP4", "__");
+        let entries = source.entries().unwrap();
 
         // Should be empty - no valid path
-        assert!(table.is_empty());
+        assert!(entries.is_empty());
     }
 
     #[test]
-    fn test_load_env_vars_overrides_existing() {
+    fn test_env_source_custom_separator() {
         let mut guard = EnvGuard::new();
-        guard.set("CFG__PORT", "9000");
+        guard.set("APP5_DB_HOST", "localhost");
 
-        let mut table = Table::new();
-        table.insert("port".to_string(), Value::Integer(8080));
+        let source = EnvSource::new("APP5", "_");
+        let entries = source.entries().unwrap();
 
-        load_env_vars(&mut table, "CFG", "__");
-
-        // Env var should override
-        assert_eq!(table.get("port"), Some(&Value::Integer(9000)));
-    }
-
-    #[test]
-    fn test_load_env_vars_custom_separator() {
-        let mut guard = EnvGuard::new();
-        guard.set("APP_DB_HOST", "localhost");
-
-        let mut table = Table::new();
-        load_env_vars(&mut table, "APP", "_");
-
-        let db = table.get("db").unwrap().as_table().unwrap();
-        assert_eq!(db.get("host"), Some(&Value::String("localhost".to_string())));
+        let entry = entries.iter().find(|e| e.path == vec!["db", "host"]);
+        assert_eq!(
+            entry.map(|e| &e.value),
+            Some(&Value::String("localhost".to_string()))
+        );
     }
 }
