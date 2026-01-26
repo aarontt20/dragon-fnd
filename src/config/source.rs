@@ -59,7 +59,7 @@ impl ConfigEntry {
 ///     }
 /// }
 /// ```
-pub trait ConfigSource: Send + Sync {
+pub trait ConfigSource: Send + Sync + std::fmt::Debug {
     /// Produces configuration entries to merge.
     ///
     /// Returns a vector of entries, each specifying a path and value.

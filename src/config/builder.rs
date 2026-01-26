@@ -172,11 +172,10 @@ impl Config {
     }
 }
 
-// Implement Debug manually since Box<dyn ConfigSource> doesn't implement Debug
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
-            .field("sources", &format!("[{} sources]", self.sources.len()))
+            .field("sources", &self.sources)
             .finish()
     }
 }

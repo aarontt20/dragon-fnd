@@ -33,11 +33,17 @@ impl EnvSource {
     /// # Arguments
     ///
     /// * `prefix` - The prefix that identifies relevant env vars (e.g., "MYAPP")
-    /// * `separator` - The separator between path segments (e.g., "__")
+    /// * `separator` - The separator between path segments (e.g., "__"). Must not be empty.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `separator` is empty.
     pub fn new(prefix: impl Into<String>, separator: impl Into<String>) -> Self {
+        let separator = separator.into();
+        assert!(!separator.is_empty(), "separator must not be empty");
         Self {
             prefix: prefix.into(),
-            separator: separator.into(),
+            separator,
         }
     }
 }
@@ -283,5 +289,11 @@ mod tests {
             entry.map(|e| &e.value),
             Some(&Value::String("localhost".to_string()))
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "separator must not be empty")]
+    fn test_env_source_empty_separator_panics() {
+        let _ = EnvSource::new("APP", "");
     }
 }
