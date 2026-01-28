@@ -1,5 +1,3 @@
-//! Configuration loading and management.
-
 mod builder;
 mod env;
 mod error;
