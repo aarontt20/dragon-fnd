@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
-/// Errors that can occur when loading or parsing configuration.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ConfigError {

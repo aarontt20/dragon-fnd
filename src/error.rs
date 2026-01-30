@@ -1,7 +1,6 @@
 use crate::config::ConfigError;
 use thiserror::Error;
 
-/// Top-level error type for the dragon-fnd library.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Error {
