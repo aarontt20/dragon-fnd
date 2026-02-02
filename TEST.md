@@ -2,7 +2,7 @@
 
 This document describes the test coverage for dragon-fnd. Tests were removed from source files to keep implementation code focused.
 
-**Total: 28 unit tests**
+**Total: 32 unit tests**
 
 ---
 
@@ -76,28 +76,88 @@ Tests for `EnvSource` environment variable loading and `coerce_value()` type coe
 
 ---
 
-## Module: `config::resolve` (8 tests)
+## Module: `config::resolve` (32 tests)
 
-Tests for `${path.to.field}` variable reference resolution.
+Tests for `${path.to.field}` variable reference resolution, including string interpolation,
+full value substitution, graph-based dependency resolution, and error handling.
+
+### Basic String Interpolation (4 tests)
 
 | Test | Coverage | Behavior Verified |
 |------|----------|-------------------|
-| `test_simple_reference` | Basic substitution | `${host}` in string replaced with value of `host` key |
-| `test_nested_path` | Dotted paths | `${server.host}` navigates nested tables correctly |
-| `test_chained_references` | Multi-pass resolution | References that resolve to strings containing more references are iteratively resolved |
-| `test_escape_sequence` | Escape handling | `$$` produces literal `$`; `$${VAR}` becomes `${VAR}` |
-| `test_integer_coercion` | Non-string values | Integer values converted to string when referenced |
-| `test_circular_reference` | Cycle detection | Circular references (`a="${b}"`, `b="${a}"`) return `ConfigError::CircularReference` after max iterations |
-| `test_missing_reference` | Not found error | Reference to non-existent path returns `ConfigError::ReferenceNotFound` |
-| `test_array_values` | Array traversal | References inside array elements are resolved |
+| `simple_reference` | Basic substitution | `${name}` replaced with value of `name` key |
+| `multiple_references_in_one_string` | Multiple refs | `${host}:${port}` both resolved in single string |
+| `nested_path_reference` | Dotted paths | `${database.host}` navigates nested tables |
+| `no_references_unchanged` | No-op case | Strings without `${...}` are not modified |
 
-### Coverage Gaps
+### Full Value Substitution (6 tests)
 
-- `ConfigError::InvalidReferencePath` (empty path segments like `${a..b}`) - not tested
-- `ConfigError::NonScalarReference` (referencing table/array values) - not tested
-- `ConfigError::UnclosedReference` (missing `}`) - not tested
-- Float, boolean, datetime value coercion in references - not directly tested
-- Lone `$` without `{` or second `$` - not tested (falls through to literal `$`)
+Pure references (`"${path}"` with nothing else) preserve the original type.
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `pure_reference_preserves_integer` | Integer type | `"${default_port}"` becomes integer, not string |
+| `pure_reference_preserves_boolean` | Boolean type | `"${debug}"` becomes boolean |
+| `pure_reference_preserves_float` | Float type | `"${rate}"` becomes float |
+| `pure_reference_copies_array` | Array copy | `"${tags}"` copies entire array |
+| `pure_reference_copies_table` | Table copy | `"${defaults}"` copies entire table |
+| `pure_reference_with_whitespace` | Whitespace trim | `"  ${value}  "` still treated as pure reference |
+
+### Chained References (3 tests)
+
+Graph-based resolution handles dependencies correctly.
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `chained_references` | String chain | `a→b→c` resolved in correct order |
+| `chained_pure_references` | Type-preserving chain | Pure refs through multiple levels preserve type |
+| `deep_chain` | 5-level chain | `v1→v2→v3→v4→v5` resolves correctly |
+
+### Arrays (2 tests)
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `references_in_array_elements` | String refs in array | Each array element's refs resolved |
+| `pure_reference_in_array` | Type-preserving in array | Array elements can be pure refs |
+
+### Escape Sequences (3 tests)
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `escaped_dollar_sign_with_reference` | Escape with ref | `$$` becomes `$` when string has refs |
+| `mixed_escaped_and_reference` | Combined | `$$${amount}` → `$50` |
+| `string_without_references_unchanged` | Limitation | `$$` without refs stays as `$$` |
+
+### Type Coercion in Interpolation (2 tests)
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `integer_to_string_in_interpolation` | Int→string | `"port ${port}"` converts int to string |
+| `boolean_to_string_in_interpolation` | Bool→string | `"debug: ${enabled}"` converts bool to string |
+
+### Error Cases (12 tests)
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `circular_reference_detected` | 2-way cycle | `a="${b}", b="${a}"` → `CircularReference` |
+| `self_reference_detected` | Self cycle | `a="${a}"` → `CircularReference` |
+| `three_way_cycle_detected` | 3-way cycle | `a→b→c→a` → `CircularReference` |
+| `reference_not_found` | Missing ref | `${nonexistent}` → `ReferenceNotFound` |
+| `nested_reference_not_found` | Missing nested | `${database.port}` when port missing → `ReferenceNotFound` |
+| `unclosed_reference_with_valid_reference` | Mixed valid/unclosed | String with valid + unclosed ref → `UnclosedReference` |
+| `unclosed_reference_alone` | Only unclosed | `${unclosed` → `UnclosedReference` |
+| `unclosed_reference_in_nested_table` | Nested unclosed | Unclosed ref in `[server]` section detected |
+| `unclosed_reference_in_array` | Array unclosed | Unclosed ref in array element detected |
+| `non_scalar_in_interpolation` | Table in string | `"text ${table}"` → `NonScalarReference` |
+| `array_in_interpolation` | Array in string | `"items: ${array}"` → `NonScalarReference` |
+| `invalid_path_empty_segment` | Bad path | `${a..b}` → `InvalidReferencePath` |
+
+### Coverage Notes
+
+- All `ConfigError` variants for resolve are now tested
+- Graph-based cycle detection catches all cycle types immediately
+- Full value substitution tested for all TOML types (int, float, bool, array, table)
+- Escape sequences only processed in strings containing actual references (documented limitation)
 
 ---
 
@@ -137,13 +197,16 @@ No unit tests. Error types tested indirectly via other module tests.
 - `merge_at_path()` - all major code paths
 - `coerce_value()` - all type coercion branches
 - `EnvSource::entries()` - prefix matching, path parsing, edge cases
-- `resolve_references()` - substitution, chaining, cycles, errors
+- `resolve_references()` - comprehensive coverage including:
+  - String interpolation and full value substitution
+  - Graph-based dependency resolution
+  - All error variants (CircularReference, ReferenceNotFound, UnclosedReference, NonScalarReference, InvalidReferencePath)
+  - Type preservation for pure references
+  - Chained references at multiple depths
 
 ### Partially Covered
 - `FileSource` - happy path and not-found; missing I/O error and parse error cases
-- `resolve.rs` error variants - only CircularReference, ReferenceNotFound tested
 
 ### Not Covered
 - `Config` builder (no direct tests)
 - `AppContext` and `AppContextBuilder` (no tests)
-- Several `ConfigError` variants never triggered in tests

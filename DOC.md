@@ -119,16 +119,58 @@ earlier ones. Nested tables are merged recursively; other values
 
 #### Variable References
 
-String values can reference other config values using `${path.to.field}` syntax:
+String values can reference other config values using `${path.to.field}` syntax.
+
+**String Interpolation** - References embedded in text are converted to strings:
 
 ```toml
 [server]
 host = "localhost"
 port = 8080
 url = "http://${server.host}:${server.port}/api"
+# Result: url = "http://localhost:8080/api"
 ```
 
-Use `$$` to escape a literal `$` (e.g., `$${VAR}` becomes `${VAR}`).
+**Full Value Substitution** - A string containing *only* a reference (`"${path}"`)
+preserves the original value's type:
+
+```toml
+[defaults]
+port = 8080
+tags = ["api", "v1"]
+timeout = { connect = 5, read = 30 }
+
+[server]
+port = "${defaults.port}"           # → integer 8080
+tags = "${defaults.tags}"           # → array ["api", "v1"]
+timeout = "${defaults.timeout}"     # → table { connect = 5, read = 30 }
+```
+
+**Escape Sequences** - Use `$$` to produce a literal `$` when the string also
+contains references:
+
+```toml
+amount = 50
+price = "$$${amount} USD"  # → "$50 USD"
+```
+
+Note: Strings without any `${...}` references are not processed, so `$$` in those
+strings remains as `$$`.
+
+**Resolution Order** - References are resolved using topological sort, so
+dependencies are always resolved before dependents. This allows chained references:
+
+```toml
+a = "base"
+b = "${a}-middle"    # → "base-middle"
+c = "${b}-end"       # → "base-middle-end"
+```
+
+**Errors**:
+- Circular references (e.g., `a = "${b}"`, `b = "${a}"`) are detected and reported
+- Missing references return `ReferenceNotFound`
+- Unclosed references (`"${missing_brace"`) return `UnclosedReference`
+- Referencing arrays/tables in string interpolation returns `NonScalarReference`
 
 #### Example
 
@@ -291,44 +333,51 @@ Checks if a string looks like an integer (optional minus followed by digits).
 Variable reference resolution for configuration values.
 
 Supports `${section.field}` syntax for cross-referencing values within config.
-Use `$${...}` to escape and produce a literal `${...}`.
+Use `$${...}` to escape and produce a literal `${...}` in strings that also
+contain references.
+
+### Resolution Algorithm
+
+Resolution uses a graph-based approach with three phases:
+
+1. **Collection** - Walk the config tree and collect all `${...}` references
+   as `(source_path, target_path)` pairs
+
+2. **Topological Sort** - Build a dependency graph and sort references so
+   dependencies are resolved before dependents. Circular references are
+   detected during this phase via DFS cycle detection.
+
+3. **Resolution** - Process references in topological order. Each reference
+   is resolved exactly once, with its dependencies guaranteed to be resolved.
+
+This approach is O(n) compared to iterative resolution which could be O(n × depth).
 
 ### `resolve_references`
 
 ```rust
-fn resolve_references(table: &mut Table) -> Result<(), ConfigError>
+pub fn resolve_references(table: &mut Table) -> Result<(), ConfigError>
 ```
 
 Resolves all `${path.to.field}` references in the configuration table.
 
-Iteratively resolves references until no more substitutions are made.
-Returns an error if a circular reference is detected or a referenced path doesn't exist.
+**Behavior:**
+- Pure references (`"${path}"` with nothing else) perform full value substitution,
+  preserving the original type (integer, boolean, array, table, etc.)
+- Embedded references (`"prefix${path}suffix"`) perform string interpolation,
+  converting referenced values to strings
+- Circular references are detected and return `ConfigError::CircularReference`
+- Missing references return `ConfigError::ReferenceNotFound`
+- Unclosed references (`${missing_brace`) return `ConfigError::UnclosedReference`
 
-### `resolve_pass` (private)
+### Key Functions (private)
 
-Performs a single resolution pass over all string values.
-Returns the number of substitutions made.
-
-### `resolve_value` (private)
-
-Resolves references in a single value (recursively for tables/arrays).
-
-### `resolve_string` (private)
-
-Resolves all `${...}` references in a string.
-Handles `$$` escape sequences.
-
-### `consume_until` (private)
-
-Consumes characters until the delimiter, returning the collected string.
-
-### `lookup_path` (private)
-
-Looks up a dotted path in the TOML table and returns the value as a string.
-
-### `value_to_string` (private)
-
-Converts a TOML value to its string representation.
+- `collect_references` - Walks the config tree, extracts all references
+- `topological_sort` - Orders references by dependency, detects cycles
+- `resolve_at_path` - Resolves references at a specific config path
+- `is_pure_reference` - Checks if string is exactly `${path}` (full substitution)
+- `resolve_string` - Resolves references in a string value
+- `lookup_value` - Navigates dotted path to find referenced value
+- `value_to_string` - Converts value to string for interpolation
 
 ---
 
