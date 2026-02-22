@@ -206,8 +206,9 @@ fn get_value_mut<'a>(table: &'a mut Table, path: &[String]) -> Result<&'a mut Va
 
 /// Check if string is exactly `${path}` (full value substitution)
 fn is_pure_reference(s: &str) -> Option<&str> {
-    if s.starts_with("${") && s.ends_with('}') && s.matches("${").count() == 1 {
-        Some(&s[2..s.len() - 1])
+    let inner = s.strip_prefix("${")?.strip_suffix('}')?;
+    if !inner.contains('}') && !inner.contains("${") {
+        Some(inner)
     } else {
         None
     }
@@ -385,6 +386,16 @@ mod tests {
         let config = table["server"]["config"].as_table().unwrap();
         assert_eq!(config["host"].as_str(), Some("localhost"));
         assert_eq!(config["port"].as_integer(), Some(8080));
+    }
+
+    #[test]
+    fn trailing_brace_is_interpolation_not_pure_reference() {
+        let mut table = table_from_toml(r#"
+            name = "world"
+            msg = "${name}}"
+        "#);
+        resolve_references(&mut table).unwrap();
+        assert_eq!(table["msg"].as_str(), Some("world}"));
     }
 
     #[test]
