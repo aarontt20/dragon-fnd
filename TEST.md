@@ -2,7 +2,7 @@
 
 This document describes the test coverage for dragon-fnd. Tests were removed from source files to keep implementation code focused.
 
-**Total: 32 unit tests**
+**Total: 52 unit tests**
 
 ---
 
@@ -48,7 +48,7 @@ Tests for `FileSource` TOML file loading.
 
 Tests for `EnvSource` environment variable loading and `coerce_value()` type coercion.
 
-### `coerce_value` (6 tests)
+### `coerce_value` (5 tests)
 
 | Test | Coverage | Behavior Verified |
 |------|----------|-------------------|
@@ -58,7 +58,7 @@ Tests for `EnvSource` environment variable loading and `coerce_value()` type coe
 | `test_coerce_string` | String fallback | Non-numeric/boolean strings kept as-is; note: `"007"` parses as integer 7 |
 | `test_coerce_edge_cases` | Edge cases | Empty string → string; lone `-` → string; `"1.2.3"` (invalid float) → string |
 
-### `EnvSource` (6 tests)
+### `EnvSource` (7 tests)
 
 | Test | Coverage | Behavior Verified |
 |------|----------|-------------------|
@@ -101,7 +101,7 @@ Pure references (`"${path}"` with nothing else) preserve the original type.
 | `pure_reference_preserves_float` | Float type | `"${rate}"` becomes float |
 | `pure_reference_copies_array` | Array copy | `"${tags}"` copies entire array |
 | `pure_reference_copies_table` | Table copy | `"${defaults}"` copies entire table |
-| `pure_reference_with_whitespace` | Whitespace trim | `"  ${value}  "` still treated as pure reference |
+| `whitespace_around_reference_is_interpolation` | Whitespace significant | `"  ${value}  "` treated as string interpolation (result includes spaces), not pure substitution |
 
 ### Chained References (3 tests)
 
