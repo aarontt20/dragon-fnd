@@ -2,7 +2,7 @@
 
 Tests are inline (`#[cfg(test)]` modules in source files) plus integration tests in `tests/`.
 
-**Total: 52 unit tests + 7 integration tests + 2 doc-tests = 61 tests**
+**Total: 55 unit tests + 7 integration tests + 2 doc-tests = 64 tests**
 
 ---
 
@@ -77,7 +77,7 @@ Tests for `EnvSource` environment variable loading and `coerce_value()` type coe
 
 ---
 
-## Module: `config::resolve` (32 tests)
+## Module: `config::resolve` (33 tests)
 
 Tests for `${path.to.field}` variable reference resolution, including string interpolation,
 full value substitution, graph-based dependency resolution, and error handling.
@@ -91,7 +91,7 @@ full value substitution, graph-based dependency resolution, and error handling.
 | `nested_path_reference` | Dotted paths | `${database.host}` navigates nested tables |
 | `no_references_unchanged` | No-op case | Strings without `${...}` are not modified |
 
-### Full Value Substitution (6 tests)
+### Full Value Substitution (7 tests)
 
 Pure references (`"${path}"` with nothing else) preserve the original type.
 
@@ -102,6 +102,7 @@ Pure references (`"${path}"` with nothing else) preserve the original type.
 | `pure_reference_preserves_float` | Float type | `"${rate}"` becomes float |
 | `pure_reference_copies_array` | Array copy | `"${tags}"` copies entire array |
 | `pure_reference_copies_table` | Table copy | `"${defaults}"` copies entire table |
+| `trailing_brace_is_interpolation_not_pure_reference` | Trailing `}` guard | `"${name}}"` is string interpolation producing `"world}"`, not a pure reference with path `name}` |
 | `whitespace_around_reference_is_interpolation` | Whitespace significant | `"  ${value}  "` treated as string interpolation (result includes spaces), not pure substitution |
 
 ### Chained References (3 tests)
