@@ -31,7 +31,7 @@ fn main() -> Result<(), dragon_fnd::Error> {
                 .with_file("examples/dev.toml", false)
                 .build::<AppConfig>()?,
         )
-        .build_sync();
+        .build_sync()?;
 
     // Zero-cost reference access
     let config = ctx.config();

@@ -7,13 +7,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `docs/DESIGN.md` — How the built system works (architecture, current state)
 - `docs/VISION.md` — Where the project is going (planned subsystems, design philosophy)
 - `DOC.md` — API documentation
-- `TEST.md` — Test coverage documentation (55 unit tests + integration tests, in-tree)
+- `TEST.md` — Test coverage documentation (87 unit + 16 integration + 2 doc-tests with logging feature)
 
 ## Build Commands
 
 ```bash
 cargo build              # Build the library
-cargo test               # Run all tests (55 unit + 7 integration + 2 doc-tests)
+cargo test               # Run all tests (54 unit + 8 integration + 2 doc-tests)
+cargo test --features logging  # Run all tests including logging (87 unit + 16 integration + 2 doc-tests)
 cargo test resolve       # Run tests matching "resolve"
 cargo clippy             # Run linter
 cargo doc --open         # Generate and view documentation
@@ -37,6 +38,12 @@ src/
 │   ├── env.rs          # EnvSource: loads environment variables
 │   ├── resolve.rs      # Variable reference resolution (${path.to.field})
 │   └── error.rs        # ConfigError enum
+├── logging/            # Feature: "logging"
+│   ├── mod.rs          # Re-exports, pub(crate) init_logging
+│   ├── config.rs       # LoggingConfig, ConsoleConfig, FileConfig (serde types)
+│   ├── builder.rs      # LoggingBuilder, ConsoleBuilder, FileBuilder (fluent API)
+│   ├── error.rs        # LoggingError enum
+│   └── init.rs         # Subscriber initialization, retention cleanup
 └── context/
     └── mod.rs          # AppContext with type-state AppContextBuilder
 ```
@@ -64,9 +71,9 @@ src/
 
 3. **Deserialization at build time**: Config is parsed once into the target type `T`, making subsequent access zero-cost
 
-4. **Error hierarchy**: `ConfigError` for config-specific errors, wrapped by top-level `Error`
+4. **Error hierarchy**: `ConfigError` for config-specific errors, `LoggingError` for logging errors, both wrapped by top-level `Error`
 
-5. **Type-state AppContext builder**: `build_sync()` only exists when config is provided — compile-time enforcement, no runtime `MissingConfig` errors
+5. **Type-state AppContext builder**: `build_sync()` only exists when config is provided — compile-time enforcement, no runtime `MissingConfig` errors. Returns `Result` since subsystems can fail to initialize.
 
 ### Variable Resolution
 
@@ -114,7 +121,7 @@ These are hard constraints learned from the previous attempt. Do not violate the
 1. **No panicking in library code.** Every accessor returns `Result` or `Option`. The old version had `ctx.database()` that panicked if the subsystem wasn't enabled — this was the single most criticized design flaw.
 2. **No silent failures.** Every error must be surfaced. Missing config files, malformed references, failed path navigation — all must produce explicit errors, not silent fallbacks.
 3. **Library does not own CLI args.** The library provides a `ConfigSource` adapter for feeding parsed args into config. It does not depend on clap, does not call `parse()`, and does not prescribe argument structure.
-4. **Trait boundary for every subsystem.** Each subsystem follows three layers: trait (always available) → default implementation (feature-gated) → custom implementation (user-provided). The library says "satisfy this contract" not "use this crate."
+4. **Trait boundary for every subsystem.** Each subsystem follows three layers: trait (always available) → default implementation (feature-gated) → custom implementation (user-provided). The library says "satisfy this contract" not "use this crate." **Exception:** Logging uses `tracing` directly — the crate itself is the trait boundary. Adding a library-level trait on top would add indirection with no value.
 5. **Feature-gated opt-in.** Each subsystem lives behind a Cargo feature flag. Downstream projects only pay for what they enable.
 6. **Own it or bridge to it.** For each subsystem, ask: "does it make sense for the library to own this?" Own it (behind a feature) when it's pure boilerplate nobody wants to write twice — logging setup, database pool init, shutdown signal handling, server lifecycle. Bridge to it when it's too application-specific — argument parsing, HTTP routing, middleware, query logic, file content decisions. This is the decision framework for where the library's responsibility ends.
 

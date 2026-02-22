@@ -18,19 +18,22 @@ fn builder_chain_with_config_and_build_sync() {
         .build()
         .unwrap();
 
-    let ctx = AppContext::builder().with_config(config).build_sync();
+    let ctx = AppContext::builder()
+        .with_config(config)
+        .build_sync()
+        .unwrap();
 
     assert_eq!(ctx.config().name, "test");
     assert_eq!(ctx.config().port, 3000);
 }
 
 #[test]
-fn build_sync_is_infallible() {
-    // build_sync() returns AppContext<C> directly, not Result.
-    // This test verifies the return type by assigning without ? or unwrap().
-    let ctx: AppContext<String> = AppContext::builder()
+fn build_sync_returns_result() {
+    // build_sync() returns Result<AppContext<C>, Error>.
+    let ctx = AppContext::builder()
         .with_config("hello".to_string())
-        .build_sync();
+        .build_sync()
+        .unwrap();
 
     assert_eq!(ctx.config(), "hello");
 }
@@ -39,7 +42,8 @@ fn build_sync_is_infallible() {
 fn app_context_debug_output() {
     let ctx = AppContext::builder()
         .with_config(42u32)
-        .build_sync();
+        .build_sync()
+        .unwrap();
 
     let debug = format!("{:?}", ctx);
     assert!(debug.contains("AppContext"));

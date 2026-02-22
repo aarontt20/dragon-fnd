@@ -6,7 +6,9 @@ This document captures what dragon-fnd will become — the subsystems on the hor
 
 ## What's Already Built
 
-The config subsystem is complete: `ConfigSource` trait for extensible input channels, `FileSource` (TOML files), `EnvSource` (environment variables with prefix/separator), a `ConfigBuilder` with fluent API and generic `build::<T>()`, and graph-based `${path.to.field}` variable resolution with topological sort, cycle detection, and full value substitution. `AppContext<C>` uses a type-state builder with compile-time enforcement — `build_sync()` is infallible and only available when config is provided. Feature flag infrastructure is in place. See DESIGN.md for full details. What follows is everything that's still ahead.
+The config subsystem is complete: `ConfigSource` trait for extensible input channels, `FileSource` (TOML files), `EnvSource` (environment variables with prefix/separator), a `ConfigBuilder` with fluent API and generic `build::<T>()`, and graph-based `${path.to.field}` variable resolution with topological sort, cycle detection, and full value substitution. `AppContext<C>` uses a type-state builder with compile-time enforcement — `build_sync()` returns `Result` and is only available when config is provided.
+
+The logging subsystem is complete: structured logging via `tracing` with console and file outputs, per-layer `EnvFilter` configuration, time-based file rotation (daily/hourly/never) via `tracing-appender`, retention cleanup (days-based or file-count), fluent builder API (`LoggingBuilder`, `ConsoleBuilder`, `FileBuilder`), and full `AppContext` integration. Logging is the first feature-gated subsystem (`logging` feature). See DESIGN.md for full details. What follows is everything that's still ahead.
 
 ---
 
@@ -25,7 +27,7 @@ Each subsystem lives behind its own feature flag. You only pay for what you use 
 |-----------|---------|------------|--------|
 | Config | *(always on)* | — | Built |
 | CLI Args | `cli` | Config | Planned |
-| Logging | `logging` | Config | Planned |
+| Logging | `logging` | Config | Built |
 | SQLite | `sqlite` | Config | Planned |
 | FS Storage | `fs` | Config | Planned |
 | Graceful Shutdown | `shutdown` | — | Planned |
@@ -45,15 +47,17 @@ Each subsystem lives behind its own feature flag. You only pay for what you use 
 
 Every subsystem follows the same three-layer pattern:
 
-| Layer | Who Owns It | Example (Logging) |
+| Layer | Who Owns It | Example (Database) |
 |-------|-------------|-------------------|
 | **Trait / interface** | Library (always available) | "Something that can be initialized from config and produces a handle" |
-| **Default implementation** | Library (feature-gated) | `TracingLogger` that reads log config and sets up `tracing-subscriber` |
-| **Custom implementation** | User (in their application) | Their own logger, a wrapper, or nothing at all |
+| **Default implementation** | Library (feature-gated) | `sqlx` pool init with migrations |
+| **Custom implementation** | User (in their application) | Their own pool, a wrapper, or nothing at all |
 
-The library says "if you can satisfy this contract, I can manage the lifecycle." It never says "you must use this specific crate." The feature-gated defaults are conveniences — they save you from rebuilding tracing setup for the tenth time, but they are not the only path.
+The library says "if you can satisfy this contract, I can manage the lifecycle." It never says "you must use this specific crate." The feature-gated defaults are conveniences — they save you from rebuilding boilerplate for the tenth time, but they are not the only path.
 
-This pattern is already established in the config system: `ConfigSource` is the trait, `FileSource` and `EnvSource` are the defaults, and `with_source()` accepts anything that implements the contract.
+This pattern is established in the config system: `ConfigSource` is the trait, `FileSource` and `EnvSource` are the defaults, and `with_source()` accepts anything that implements the contract.
+
+**Exception: Logging.** The logging subsystem does not define its own trait. `tracing` is the Rust ecosystem's de facto logging abstraction — the crate itself provides the interface contract (instrument with `tracing::info!()`, swap subscribers via layers). The library configures the subscriber; users extend via `tracing-subscriber`'s layer system. This is an explicit exception to the three-layer pattern, justified because adding a library-level trait on top of `tracing` would add indirection with no real value.
 
 ---
 
@@ -112,16 +116,18 @@ This mirrors the graph-based approach already used in variable resolution — th
 
 ```rust
 let ctx = AppContext::builder()
+    .with_logging(LoggingBuilder::from_config(&config.logging))  // feature: "logging"
     .with_config(config)        // always available
-    .with_logging()?            // feature: "logging"
-    .with_database("app.db")?   // feature: "sqlite"
-    .with_shutdown()             // feature: "shutdown"
+    .with_database("app.db")    // feature: "sqlite" (planned)
+    .with_shutdown()             // feature: "shutdown" (planned)
     .build()                     // async, because sqlite requires it
     .await?;
 
 ctx.config();     // &MyConfig — always available
 ctx.database();   // &Pool — only available because with_database() was called
 ```
+
+Note: `with_logging()` is available on all builder states (before or after `with_config()`). Logging initialization happens inside `build_sync()` / `build()`, not at registration time. Size-based rotation is not currently supported — `tracing-appender` provides time-based only. This could be added later via a custom appender.
 
 ---
 
@@ -149,15 +155,11 @@ The key insight: CLI args are not special. They are just another config source w
 
 ---
 
-## Logging Subsystem
+## Logging Subsystem — Built
 
-**Feature:** `logging`
+**Feature:** `logging` — See [DESIGN.md](DESIGN.md) for full details.
 
-Structured logging via `tracing`, configured from the config layer. The subsystem reads logging configuration (filter level, format, output destinations) from the merged config and initializes `tracing-subscriber` accordingly.
-
-Initialization returns a guard (e.g., `WorkerGuard` for non-blocking file appenders) that must be held for the application lifetime. `AppContext` holds this guard. When the context is dropped, the guard flushes and logging shuts down cleanly.
-
-The old version applied environment-based defaults via hidden `effective_filter()` and `effective_format()` methods — development got pretty+info, production got json+warn. The rewrite will make defaults explicit in the config layer (e.g., ship a sensible default config) rather than burying them in accessor methods. What you see in config is what you get.
+Future extensions: size-based rotation (requires custom appender beyond `tracing-appender`), additional output sinks (network, syslog).
 
 ---
 
@@ -219,17 +221,11 @@ The library manages the server's lifecycle — startup, readiness, and graceful 
 
 ---
 
-## The Environment Question
+## The Environment Question — Resolved
 
 The old version had a first-class "environment" concept — the `{PREFIX}_ENV` variable determined whether the application ran in development, testing, or production, and subsystems applied environment-aware defaults (pretty logging in dev, JSON logging in prod).
 
-Two valid approaches:
-
-**A) Library knows about environments.** A well-known `environment` field in config. Subsystems read it and apply sensible defaults. Less boilerplate for the common case. Risk: the library starts making assumptions about what "production" means.
-
-**B) Environment is just config.** The user creates `config/dev.toml` and `config/prod.toml` and layers them explicitly. The library has no opinion about environments. Maximum flexibility. More wiring per project.
-
-This tension is unresolved. The right answer will likely emerge when the logging subsystem lands — logging is the subsystem most affected by environment-aware defaults, so it will force the question.
+**Decision: Environment is just config.** The user creates `config/dev.toml` and `config/prod.toml` and layers them explicitly. The library has no opinion about environments. This was confirmed when the logging subsystem landed — logging config is fully explicit (format, filter, outputs) with no hidden environment-aware defaults. What you see in config is what you get.
 
 ---
 

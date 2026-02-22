@@ -2,7 +2,8 @@
 
 Tests are inline (`#[cfg(test)]` modules in source files) plus integration tests in `tests/`.
 
-**Total: 55 unit tests + 7 integration tests + 2 doc-tests = 64 tests**
+**Without logging feature: 54 unit tests + 8 integration tests + 2 doc-tests = 64 tests**
+**With logging feature: 87 unit tests + 16 integration tests + 2 doc-tests = 105 tests**
 
 ---
 
@@ -163,6 +164,83 @@ Graph-based resolution handles dependencies correctly.
 
 ---
 
+## Module: `logging::config` (8 tests, feature: `logging`)
+
+Tests for serde deserialization of logging config types.
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `logging_config_defaults` | Default values | All defaults correct: enabled, info filter, console on, file off |
+| `full_toml_round_trip` | Complete config | Full TOML with all fields deserializes correctly |
+| `format_variants_parse` | LogFormat | `"pretty"`, `"json"`, `"compact"` all parse |
+| `rotation_variants_parse` | Rotation | `"daily"`, `"hourly"`, `"never"` all parse |
+| `retain_days_only` | Retention | `retain_days` without `retain_files` parses |
+| `retain_files_only` | Retention | `retain_files` without `retain_days` parses |
+| `console_filter_override_parses` | Per-layer filter | Console filter override parses correctly |
+| `file_filter_override_parses` | Per-layer filter | File filter override parses correctly |
+
+---
+
+## Module: `logging::builder` (9 tests, feature: `logging`)
+
+Tests for fluent builder API.
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `new_matches_config_defaults` | Default alignment | `LoggingBuilder::new()` matches `LoggingConfig::default()` |
+| `from_config_round_trips` | Config bridge | `from_config()` + `into_config()` round-trips all fields |
+| `fluent_overrides` | Builder methods | `filter()`, `module()`, `enabled()` modify config correctly |
+| `console_builder_overrides` | Console builder | `format()`, `filter()`, `enabled()` on ConsoleBuilder |
+| `file_builder_enables_by_default` | Auto-enable | `FileBuilder::new(dir)` sets `enabled = true` |
+| `file_builder_overrides` | File builder | All FileBuilder methods set correct fields |
+| `retain_days_clears_retain_files` | Mutual exclusion | `retain_days()` after `retain_files()` clears files |
+| `retain_files_clears_retain_days` | Mutual exclusion | `retain_files()` after `retain_days()` clears days |
+| `console_and_file_compose_into_logging_builder` | Composition | Full builder chain with console + file produces correct config |
+
+---
+
+## Module: `logging::init` (16 tests, feature: `logging`)
+
+Tests for subscriber initialization and retention cleanup.
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `build_env_filter_valid_base` | Filter building | Valid base directive produces EnvFilter |
+| `build_env_filter_with_modules` | Module overrides | Per-module directives appended correctly |
+| `build_env_filter_invalid_directive` | Invalid filter | Malformed directive returns `InvalidFilter` |
+| `build_env_filter_invalid_module` | Invalid module | Invalid module level returns error |
+| `resolve_layer_filter_uses_override` | Layer filter | Override filter is used when present |
+| `resolve_layer_filter_falls_back_to_base` | Layer filter | Base filter cloned when no override |
+| `disabled_logging_returns_none` | Master switch | `enabled = false` returns `Ok(None)` |
+| `retention_validation_both_set` | Validation | Both `retain_days` and `retain_files` returns `InvalidRetention` |
+| `retention_validation_zero_days` | Validation | `retain_days = 0` returns `InvalidRetention` |
+| `retention_validation_zero_files` | Validation | `retain_files = 0` returns `InvalidRetention` |
+| `retention_validation_never_rotation_with_retention` | Validation | `Rotation::Never` + retention returns `InvalidRetention` |
+| `build_file_layer_creates_directory` | Dir creation | Nested log directory created automatically |
+| `cleanup_old_logs_days_retention` | Days retention | Files older than N days are deleted |
+| `cleanup_old_logs_files_retention` | File count | Only N newest files kept, oldest deleted |
+| `cleanup_old_logs_nonexistent_dir` | Missing dir | Nonexistent directory returns empty errors |
+| `cleanup_old_logs_non_matching_prefix_ignored` | Prefix filter | Files not matching prefix are untouched |
+
+---
+
+## Integration Tests: `logging_init` (8 tests, feature: `logging`)
+
+End-to-end tests for logging integration with AppContext (`tests/logging_init.rs`).
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `build_sync_with_console_logging` | Console init | Console-only logging via AppContext builder |
+| `build_sync_with_logging_disabled` | Disabled | `enabled(false)` still produces valid AppContext |
+| `build_sync_with_file_logging` | File init | File logging creates log directory via AppContext |
+| `build_sync_without_logging_still_works` | No logging | No `with_logging()` call produces valid AppContext |
+| `with_logging_before_config` | Builder ordering | `with_logging()` before `with_config()` works |
+| `with_logging_after_config` | Builder ordering | `with_logging()` after `with_config()` works |
+| `invalid_retention_skipped_when_file_disabled` | Validation gating | Conflicting retention values don't error when file logging is disabled |
+| `invalid_retention_config_errors` | Error propagation | Retention validation errors surface through `build_sync()` |
+
+---
+
 ## Integration Tests: `config_builder` (4 tests)
 
 End-to-end tests for `ConfigBuilder` (`tests/config_builder.rs`).
@@ -183,7 +261,7 @@ Tests for the type-state `AppContext` builder (`tests/context.rs`).
 | Test | Coverage | Behavior Verified |
 |------|----------|-------------------|
 | `builder_chain_with_config_and_build_sync` | Full chain | `builder() → with_config() → build_sync()` produces working context with config accessor |
-| `build_sync_is_infallible` | Return type | `build_sync()` returns `AppContext<C>` directly, not `Result` — no `?` or `unwrap()` needed |
+| `build_sync_returns_result` | Return type | `build_sync()` returns `Result<AppContext<C>, Error>` |
 | `app_context_debug_output` | Debug impl | Manual `Debug` impl produces meaningful output |
 
 ---
@@ -205,7 +283,11 @@ Tests for the type-state `AppContext` builder (`tests/context.rs`).
 - `EnvSource::entries()` - prefix matching, path parsing, edge cases, validation
 - `resolve_references()` - comprehensive coverage including all error variants, type preservation, chaining
 - `ConfigBuilder` - file loading, source ordering, custom sources, error propagation
-- `AppContext` - type-state builder, infallible `build_sync()`, compile-time enforcement
+- `AppContext` - type-state builder, fallible `build_sync()`, compile-time enforcement
+- `LoggingConfig` - defaults, round-trip, all format/rotation variants, retention fields, per-layer filters
+- `LoggingBuilder` / `ConsoleBuilder` / `FileBuilder` - defaults, overrides, composition, mutual exclusion
+- `init_logging()` - filter building, disabled path, retention validation, directory creation
+- `cleanup_old_logs()` - days retention, file count retention, missing dir, prefix filtering
 
 ### Partially Covered
 - `FileSource` - happy path and not-found; missing I/O error and parse error cases

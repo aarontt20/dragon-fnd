@@ -6,7 +6,7 @@ This document describes dragon-fnd as it exists in code today. For future plans 
 
 ## What It Does
 
-dragon-fnd is a foundation library for Rust applications that provides typed configuration loading from multiple sources (TOML files, environment variables, custom sources) with deep merge semantics, graph-based variable reference resolution, and a type-state application context builder. It ships as a single crate with three dependencies (serde, toml, thiserror) and a `[features]` section for future subsystem opt-in (no features are currently active). The config subsystem is the only built component. The library does not own `main()` and does not prescribe application structure.
+dragon-fnd is a foundation library for Rust applications that provides typed configuration loading from multiple sources (TOML files, environment variables, custom sources) with deep merge semantics, graph-based variable reference resolution, and a type-state application context builder. It ships as a single crate with feature-gated subsystems — currently config (always on) and logging (`logging` feature). The library does not own `main()` and does not prescribe application structure.
 
 ---
 
@@ -15,7 +15,7 @@ dragon-fnd is a foundation library for Rust applications that provides typed con
 ```
 src/
 ├── lib.rs                 # Crate root, re-exports public API
-├── error.rs               # Top-level Error enum (1 variant)
+├── error.rs               # Top-level Error enum (2 variants)
 ├── config/
 │   ├── mod.rs             # Public exports: ConfigBuilder, ConfigError, ConfigSource, ConfigEntry
 │   ├── source.rs          # ConfigSource trait, ConfigEntry, merge_at_path, deep_merge
@@ -24,11 +24,17 @@ src/
 │   ├── env.rs             # EnvSource: loads environment variables
 │   ├── resolve.rs         # Graph-based ${path.to.field} variable resolution
 │   └── error.rs           # ConfigError enum (10 variants)
+├── logging/               # Feature: "logging"
+│   ├── mod.rs             # Re-exports, pub(crate) init_logging
+│   ├── config.rs          # LoggingConfig, ConsoleConfig, FileConfig, LogFormat, Rotation (serde)
+│   ├── builder.rs         # LoggingBuilder, ConsoleBuilder, FileBuilder (fluent API)
+│   ├── error.rs           # LoggingError enum (3 variants)
+│   └── init.rs            # Subscriber initialization, layer composition, retention cleanup
 └── context/
     └── mod.rs             # AppContext<C> with type-state AppContextBuilder
 ```
 
-10 source files. Tests are inline (`#[cfg(test)]` modules) plus integration tests in `tests/`.
+14 source files. Tests are inline (`#[cfg(test)]` modules) plus integration tests in `tests/`.
 
 ---
 
@@ -135,6 +141,60 @@ The `get_value` and `get_value_mut` functions are structurally identical — dup
 
 ---
 
+## Logging System
+
+**Feature:** `logging` — opt-in via `Cargo.toml`.
+
+Structured logging via `tracing`, configured from the config layer or programmatically via fluent builders. The subsystem reads logging configuration, builds a `tracing-subscriber` with per-layer filters, and returns a `WorkerGuard` that `AppContext` holds for the application lifetime.
+
+### Architecture Decision: No Trait Boundary
+
+The logging subsystem does not define its own trait. `tracing` is the Rust ecosystem's de facto logging abstraction — instrument with `tracing::info!()`, swap subscribers freely via `tracing-subscriber`'s layer system. The library configures the subscriber; users extend via layers. This is an explicit exception to CLAUDE.md Constraint 4 ("trait boundary for every subsystem"), justified because `tracing` already provides the interface contract.
+
+### Config Types (`src/logging/config.rs`)
+
+Serde-deserializable types for TOML configuration:
+
+- `LoggingConfig` — top-level: `enabled`, `filter` (EnvFilter directive), `modules` (per-module overrides), nested `console` and `file`
+- `ConsoleConfig` — `enabled`, `format`, optional `filter` override
+- `FileConfig` — `enabled`, `dir`, `prefix`, `format`, `rotation`, optional `filter` override, optional `retain_days` or `retain_files` (mutually exclusive)
+- `LogFormat` — `Pretty` | `Json` | `Compact`
+- `Rotation` — `Daily` | `Hourly` | `Never`
+
+### Builder Types (`src/logging/builder.rs`)
+
+Fluent API wrapping the config types — no field duplication:
+
+- `LoggingBuilder` wraps `LoggingConfig`. Constructed via `new()` (defaults) or `from_config()` (bridging from deserialized config). Methods: `filter()`, `module()`, `enabled()`, `console()`, `file()`. `into_config()` is `pub(crate)` — consumed by `build_sync()`.
+- `ConsoleBuilder` wraps `ConsoleConfig`. Methods: `format()`, `filter()`, `enabled()`.
+- `FileBuilder` wraps `FileConfig`. Constructed via `new(dir)` which auto-enables file output. Methods: `prefix()`, `format()`, `filter()`, `rotation()`, `retain_days()`, `retain_files()`. The two retention methods are mutually exclusive — each clears the other.
+
+### Subscriber Initialization (`src/logging/init.rs`)
+
+`init_logging(&LoggingConfig) -> Result<Option<WorkerGuard>, LoggingError>`
+
+Layer composition uses `Vec<Box<dyn Layer<Registry> + Send + Sync>>` — layers are collected into a Vec and applied to the registry once via `.with(layers)`. This avoids the type-mismatch problem where each `.with()` call changes the subscriber type.
+
+Each layer gets its own `EnvFilter`: the base filter (from `config.filter` + `config.modules`) plus an optional per-layer override. This enables patterns like "console at warn, file at debug".
+
+`try_init()` errors are all treated as "subscriber already set" and return `Ok(None)` — no string matching. If retention cleanup errors occurred before the subscriber was set, they are surfaced to stderr via `eprintln!` as a fallback.
+
+### Retention Cleanup
+
+`cleanup_old_logs()` runs before opening a new log file. It scans the log directory for files matching the prefix, sorts by modification time, and deletes according to the retention policy (days-based or file-count). Deletion errors are collected as `Vec<(PathBuf, io::Error)>` and logged via `tracing::warn!` after the subscriber is live — surfacing errors without blocking initialization.
+
+### Error Types (`src/logging/error.rs`)
+
+`LoggingError` — 3 variants, `#[non_exhaustive]`:
+
+| Variant | Meaning |
+|---------|---------|
+| `InvalidFilter(String)` | Malformed EnvFilter directive |
+| `InvalidRetention(String)` | Invalid retention config (mutual exclusion, zero values, Never + retention) |
+| `FileSetupFailed { dir, source }` | Could not create log directory |
+
+---
+
 ## Error Types
 
 ### ConfigError
@@ -156,13 +216,12 @@ The `get_value` and `get_value_mut` functions are structurally identical — dup
 
 ### Top-level Error
 
-`src/error.rs` — 1 variant, `#[non_exhaustive]`:
+`src/error.rs` — 2 variants, `#[non_exhaustive]`:
 
 | Variant | Meaning |
 |---------|---------|
 | `Config(ConfigError)` | Wraps any config error (with `#[from]` for `?` conversion) |
-
-The enum has a single variant because logging (the next subsystem) will add `Error::Logging(LoggingError)`. Keeping `Error` as an enum avoids collapsing and re-expanding when that lands.
+| `Logging(LoggingError)` | Wraps any logging error (cfg-gated behind `logging` feature) |
 
 ---
 
@@ -173,11 +232,12 @@ The enum has a single variant because logging (the next subsystem) will add `Err
 ```rust
 pub struct AppContext<C> {
     config: C,
-    // Future feature-gated fields added here
+    #[cfg(feature = "logging")]
+    log_guard: Option<WorkerGuard>,  // LAST field — drops last
 }
 ```
 
-`AppContext::config()` returns `&C` — zero-cost after build.
+`AppContext::config()` returns `&C` — zero-cost after build. The `log_guard` is held for its `Drop` implementation — when the context is dropped, the guard flushes pending log writes. It is the last struct field so it outlives all other subsystem handles during drop (Rust drops fields in declaration order).
 
 ### Type-State Builder
 
@@ -187,6 +247,8 @@ The builder uses type-state to enforce correct construction at compile time:
 pub struct AppContextBuilder<Cfg, Async = SyncBuild> {
     cfg: Cfg,
     _async: PhantomData<Async>,
+    #[cfg(feature = "logging")]
+    logging: Option<LoggingBuilder>,
 }
 ```
 
@@ -201,11 +263,13 @@ Two type-level dimensions:
 - `build_sync()` only exists on `SyncBuild` — future async subsystems will transition to `AsyncBuild`, removing `build_sync()` and requiring `build().await` instead
 - `PhantomData<Async>` reserves the parameter with no layout cost
 
-`build_sync()` is infallible — it returns `AppContext<C>`, not `Result`. The type-state proves config is present and no async subsystems are registered. If nothing can fail, the return type says so.
+`build_sync()` returns `Result<AppContext<C>, Error>`. Even with no subsystems registered, the signature is fallible — future subsystems also need it, and feature-flag-dependent signatures are confusing.
+
+**Subsystem registration** — `with_logging(LoggingBuilder)` is available on all builder states (`NoConfig` and `Configured<C>`) via a single generic `impl<Cfg, A>` block. This lets users register subsystems before or after providing config. The logging field is propagated through state transitions (`builder()` → `with_config()` → `build_sync()`).
 
 Marker types (`NoConfig`, `Configured<C>`, `SyncBuild`) are `pub` with `#[doc(hidden)]` — nameable for compiler error messages, hidden from generated docs. Standard Rust ecosystem convention for type-state markers.
 
-`AppContext` uses a manual `Debug` impl rather than `#[derive(Debug)]` — `WorkerGuard` (arriving with the logging subsystem) does not implement `Debug`, so the derive would break.
+`AppContext` uses a manual `Debug` impl rather than `#[derive(Debug)]` — `WorkerGuard` does not implement `Debug`, so the derive would break. The `log_guard` field is rendered as `"<WorkerGuard>"` in Debug output. `AppContextBuilder` also uses a manual Debug impl that shows whether logging is configured.
 
 A `compile_fail` doc-test verifies that `AppContext::builder().build_sync()` does not compile (no config provided).
 
@@ -220,17 +284,20 @@ A `compile_fail` doc-test verifies that `AppContext::builder().build_sync()` doe
 
 ## Dependencies
 
-Three crates, no optional dependencies. Feature flags defined but no features currently active:
+Three always-on crates, plus optional crates behind feature flags:
 
-| Crate | Version | Role |
-|-------|---------|------|
-| `serde` | 1 (with `derive`) | `DeserializeOwned` bound on `build::<T>()` |
-| `toml` | 0.8 | File parsing, `Value`/`Table` as intermediate representation |
-| `thiserror` | 2 | Error derive macros |
+| Crate | Version | Role | Feature |
+|-------|---------|------|---------|
+| `serde` | 1 (with `derive`) | `DeserializeOwned` bound on `build::<T>()` | always |
+| `toml` | 0.8 | File parsing, `Value`/`Table` as intermediate representation | always |
+| `thiserror` | 2 | Error derive macros | always |
+| `tracing` | 0.1 | Logging instrumentation API | `logging` |
+| `tracing-subscriber` | 0.3 (env-filter, json, fmt) | Subscriber layers and filtering | `logging` |
+| `tracing-appender` | 0.2 | Non-blocking file appender with rotation | `logging` |
 
 Dev dependencies: `tempfile` (filesystem tests), `serial_test` (env-var test serialization).
 
-No async runtime. No logging framework. No CLI parser.
+No async runtime. No CLI parser.
 
 ---
 

@@ -21,7 +21,7 @@ let ctx = AppContext::builder()
             .with_file("config/local.toml", false)  // optional override
             .build::<MyConfig>()?,
     )
-    .build_sync();
+    .build_sync()?;
 
 let config = ctx.config();  // &MyConfig, zero-cost
 ```
@@ -409,6 +409,7 @@ Top-level error type for the dragon-fnd library.
 
 Variants:
 - `Config(ConfigError)` - Configuration error
+- `Logging(LoggingError)` - Logging error (feature: `logging`)
 
 ---
 
@@ -441,7 +442,7 @@ let ctx = AppContext::builder()
             .with_file("config.toml", true)
             .build::<MyConfig>()?
     )
-    .build_sync();
+    .build_sync()?;
 
 let config = ctx.config();  // &MyConfig, zero-cost
 ```
@@ -464,4 +465,139 @@ The builder tracks two type-level dimensions:
 
 - `with_config<C>(self, config: C) -> AppContextBuilder<Configured<C>, SyncBuild>` - Provides the application configuration. Only available when `Cfg = NoConfig`.
 
-- `build_sync(self) -> AppContext<C>` - Builds the `AppContext`. Only available when config is provided (`Cfg = Configured<C>`) and no async subsystems are registered (`Async = SyncBuild`). This method is infallible — the type-state guarantees all requirements are met at compile time.
+- `with_logging(self, builder: LoggingBuilder) -> Self` - Registers a logging configuration to be initialized at build time. Available on all builder states (before or after `with_config()`). Feature: `logging`.
+
+- `build_sync(self) -> Result<AppContext<C>, Error>` - Builds the `AppContext`, initializing all registered subsystems. Only available when config is provided (`Cfg = Configured<C>`) and no async subsystems are registered (`Async = SyncBuild`). Returns an error if any subsystem fails to initialize.
+
+---
+
+## Module: `logging` (feature: `logging`)
+
+Structured logging via `tracing` with console and file outputs.
+
+### `LoggingConfig`
+
+Serde-deserializable logging configuration. Top-level fields:
+
+- `enabled: bool` (default: `true`) — master switch
+- `filter: String` (default: `"info"`) — base EnvFilter directive
+- `modules: BTreeMap<String, String>` (default: `{}`) — per-module overrides
+- `console: ConsoleConfig` — console output settings
+- `file: FileConfig` — file output settings
+
+### `ConsoleConfig`
+
+- `enabled: bool` (default: `true`)
+- `format: LogFormat` (default: `Pretty`)
+- `filter: Option<String>` — optional per-layer filter override
+
+### `FileConfig`
+
+- `enabled: bool` (default: `false`)
+- `dir: PathBuf` (default: `"./logs"`)
+- `prefix: String` (default: `"app"`)
+- `format: LogFormat` (default: `Json`)
+- `rotation: Rotation` (default: `Daily`)
+- `filter: Option<String>` — optional per-layer filter override
+- `retain_days: Option<u32>` — delete files older than N days
+- `retain_files: Option<u32>` — keep only N most recent files
+
+`retain_days` and `retain_files` are mutually exclusive.
+
+### `LogFormat`
+
+`Pretty` | `Json` | `Compact`
+
+### `Rotation`
+
+`Daily` | `Hourly` | `Never`
+
+### `LoggingBuilder`
+
+Fluent builder for logging configuration. Wraps `LoggingConfig` internally.
+
+**Methods:**
+
+- `new() -> Self` — defaults: console enabled at info, file disabled
+- `from_config(config: &LoggingConfig) -> Self` — bridge from deserialized config
+- `filter(self, filter: impl Into<String>) -> Self` — base filter directive
+- `module(self, module: impl Into<String>, level: impl Into<String>) -> Self` — per-module override
+- `enabled(self, enabled: bool) -> Self` — master switch
+- `console(self, console: ConsoleBuilder) -> Self` — configure console output
+- `file(self, file: FileBuilder) -> Self` — configure file output
+
+### `ConsoleBuilder`
+
+- `new() -> Self` — defaults: enabled, pretty format
+- `format(self, format: LogFormat) -> Self`
+- `filter(self, filter: impl Into<String>) -> Self`
+- `enabled(self, enabled: bool) -> Self`
+
+### `FileBuilder`
+
+- `new(dir: impl Into<PathBuf>) -> Self` — auto-enables file output
+- `prefix(self, prefix: impl Into<String>) -> Self`
+- `format(self, format: LogFormat) -> Self`
+- `filter(self, filter: impl Into<String>) -> Self`
+- `rotation(self, rotation: Rotation) -> Self`
+- `retain_days(self, days: u32) -> Self` — clears retain_files
+- `retain_files(self, count: u32) -> Self` — clears retain_days
+
+### `LoggingError`
+
+Errors that can occur when initializing the logging subsystem.
+
+Variants:
+- `InvalidFilter(String)` — malformed EnvFilter directive
+- `InvalidRetention(String)` — invalid retention config (mutual exclusion, zero values, Never + retention)
+- `FileSetupFailed { dir, source }` — could not create log directory
+
+### Example: From Config File
+
+```toml
+[logging]
+filter = "info"
+modules = { sqlx = "warn" }
+
+[logging.console]
+format = "pretty"
+
+[logging.file]
+enabled = true
+dir = "./logs"
+prefix = "myapp"
+rotation = "daily"
+retain_days = 14
+```
+
+```rust
+use dragon_fnd::logging::LoggingBuilder;
+
+let ctx = AppContext::builder()
+    .with_logging(LoggingBuilder::from_config(&config.logging))
+    .with_config(config)
+    .build_sync()?;
+```
+
+### Example: Programmatic Builder
+
+```rust
+use dragon_fnd::logging::{LoggingBuilder, ConsoleBuilder, FileBuilder, LogFormat, Rotation};
+
+let ctx = AppContext::builder()
+    .with_logging(
+        LoggingBuilder::new()
+            .filter("debug")
+            .module("sqlx", "warn")
+            .console(ConsoleBuilder::new().format(LogFormat::Pretty))
+            .file(
+                FileBuilder::new("./logs")
+                    .prefix("myapp")
+                    .format(LogFormat::Json)
+                    .rotation(Rotation::Daily)
+                    .retain_days(14),
+            ),
+    )
+    .with_config(config)
+    .build_sync()?;
+```
