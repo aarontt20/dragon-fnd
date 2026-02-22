@@ -36,4 +36,7 @@ pub enum ConfigError {
 
     #[error("unclosed reference (missing '}}')")]
     UnclosedReference,
+
+    #[error("env source separator must not be empty")]
+    InvalidSeparator,
 }

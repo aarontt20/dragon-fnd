@@ -10,12 +10,12 @@ use super::ConfigError;
 
 #[derive(Default)]
 #[must_use = "builders do nothing until .build() is called"]
-pub struct Config {
+pub struct ConfigBuilder {
     sources: Vec<Box<dyn ConfigSource>>,
 }
 
-impl Config {
-    pub fn builder() -> Self {
+impl ConfigBuilder {
+    pub fn new() -> Self {
         Self::default()
     }
 
@@ -51,9 +51,9 @@ impl Config {
     }
 }
 
-impl std::fmt::Debug for Config {
+impl std::fmt::Debug for ConfigBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Config")
+        f.debug_struct("ConfigBuilder")
             .field("sources", &self.sources)
             .finish()
     }

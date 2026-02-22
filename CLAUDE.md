@@ -7,13 +7,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `docs/DESIGN.md` — How the built system works (architecture, current state)
 - `docs/VISION.md` — Where the project is going (planned subsystems, design philosophy)
 - `DOC.md` — API documentation
-- `TEST.md` — Test coverage documentation (32 tests, currently extracted from source)
+- `TEST.md` — Test coverage documentation (52 unit tests + integration tests, in-tree)
 
 ## Build Commands
 
 ```bash
 cargo build              # Build the library
-cargo test               # Run all tests (0 in-tree; see TEST.md for coverage docs)
+cargo test               # Run all tests (52 unit + 7 integration + 2 doc-tests)
 cargo test resolve       # Run tests matching "resolve"
 cargo clippy             # Run linter
 cargo doc --open         # Generate and view documentation
@@ -30,15 +30,15 @@ src/
 ├── lib.rs              # Crate root, re-exports public API
 ├── error.rs            # Top-level Error enum
 ├── config/
-│   ├── mod.rs          # Public exports: Config, ConfigError, ConfigSource, ConfigEntry
+│   ├── mod.rs          # Public exports: ConfigBuilder, ConfigError, ConfigSource, ConfigEntry
 │   ├── source.rs       # Core abstractions: ConfigSource trait, ConfigEntry, merge_at_path
-│   ├── builder.rs      # Config builder orchestrating sources
+│   ├── builder.rs      # ConfigBuilder orchestrating sources
 │   ├── file.rs         # FileSource: loads TOML files
 │   ├── env.rs          # EnvSource: loads environment variables
 │   ├── resolve.rs      # Variable reference resolution (${path.to.field})
 │   └── error.rs        # ConfigError enum
 └── context/
-    └── mod.rs          # AppContext and AppContextBuilder
+    └── mod.rs          # AppContext with type-state AppContextBuilder
 ```
 
 ### Core Abstractions
@@ -66,6 +66,8 @@ src/
 
 4. **Error hierarchy**: `ConfigError` for config-specific errors, wrapped by top-level `Error`
 
+5. **Type-state AppContext builder**: `build_sync()` only exists when config is provided — compile-time enforcement, no runtime `MissingConfig` errors
+
 ### Variable Resolution
 
 String values can reference other config values using `${path.to.field}` syntax. Resolution happens after all sources are merged:
@@ -86,7 +88,7 @@ impl ConfigSource for MyCustomSource {
     }
 }
 
-let config: T = Config::builder()
+let config: T = ConfigBuilder::new()
     .with_file("defaults.toml", true)
     .with_source(MyCustomSource::new())
     .build()?;
@@ -118,6 +120,5 @@ These are hard constraints learned from the previous attempt. Do not violate the
 
 ## Known Limitations
 
-- **AppContext type-state**: The builder pattern uses runtime validation (`Err(MissingConfig)`) rather than compile-time enforcement
 - **Resolution operates on TOML intermediate**: Variable references target paths in the merged TOML table, not the final typed struct
 - **`lookup_value` does not support array traversal**: References inside array elements are collected and resolved correctly (via position-indexed paths), but user-written reference paths like `${arr.0}` cannot traverse into arrays — `lookup_value` only navigates tables

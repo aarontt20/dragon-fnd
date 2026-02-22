@@ -5,7 +5,7 @@ Foundation library providing configuration management and application context.
 ## Quick Example
 
 ```rust
-use dragon_fnd::{AppContext, Config};
+use dragon_fnd::{AppContext, ConfigBuilder};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -16,12 +16,12 @@ struct MyConfig {
 
 let ctx = AppContext::builder()
     .with_config(
-        Config::builder()
+        ConfigBuilder::new()
             .with_file("config/default.toml", true)
             .with_file("config/local.toml", false)  // optional override
             .build::<MyConfig>()?,
     )
-    .build()?;
+    .build_sync();
 
 let config = ctx.config();  // &MyConfig, zero-cost
 ```
@@ -109,7 +109,7 @@ For each key in overlay:
 
 ## Module: `config::builder`
 
-### `Config`
+### `ConfigBuilder`
 
 Builder for loading configuration from multiple sources.
 
@@ -175,7 +175,7 @@ c = "${b}-end"       # → "base-middle-end"
 #### Example
 
 ```rust
-use dragon_fnd::Config;
+use dragon_fnd::ConfigBuilder;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -184,7 +184,7 @@ struct MyConfig {
     port: u16,
 }
 
-let config: MyConfig = Config::builder()
+let config: MyConfig = ConfigBuilder::new()
     .with_file("config/default.toml", true)
     .with_file("config/local.toml", false)
     .build()?;
@@ -192,7 +192,7 @@ let config: MyConfig = Config::builder()
 
 **Methods:**
 
-- `builder() -> Self` - Creates a new configuration builder.
+- `new() -> Self` - Creates a new configuration builder.
 
 - `with_file(self, path: impl AsRef<Path>, required: bool) -> Self` - Adds a TOML file to be loaded. If `required` is `true`, the build will fail if the file doesn't exist. Optional files that are missing are silently skipped. Sources are applied in registration order, so later sources override earlier ones.
 
@@ -210,7 +210,7 @@ let config: MyConfig = Config::builder()
 
   ```rust
   // defaults -> env overrides -> local file overrides env
-  let config: MyConfig = Config::builder()
+  let config: MyConfig = ConfigBuilder::new()
       .with_file("config/default.toml", true)
       .with_env("MYAPP", "__")
       .with_file("config/local.toml", false)
@@ -220,7 +220,7 @@ let config: MyConfig = Config::builder()
   Example with nested config:
 
   ```rust
-  use dragon_fnd::Config;
+  use dragon_fnd::ConfigBuilder;
   use serde::Deserialize;
 
   #[derive(Deserialize)]
@@ -235,7 +235,7 @@ let config: MyConfig = Config::builder()
   }
 
   // With MYAPP__DATABASE__HOST=localhost and MYAPP__DATABASE__PORT=5432
-  let config: MyConfig = Config::builder()
+  let config: MyConfig = ConfigBuilder::new()
       .with_file("config/default.toml", true)
       .with_env("MYAPP", "__")
       .build()?;
@@ -244,7 +244,7 @@ let config: MyConfig = Config::builder()
 - `with_source(mut self, source: impl ConfigSource + 'static) -> Self` - Adds a custom configuration source. This enables extension with custom source types (CLI args, remote config, etc.) by implementing the `ConfigSource` trait.
 
   ```rust
-  use dragon_fnd::config::{ConfigSource, ConfigEntry, ConfigError};
+  use dragon_fnd::{ConfigSource, ConfigEntry, ConfigError};
 
   struct MyCustomSource { /* ... */ }
 
@@ -255,7 +255,7 @@ let config: MyConfig = Config::builder()
       }
   }
 
-  let config: MyConfig = Config::builder()
+  let config: MyConfig = ConfigBuilder::new()
       .with_file("defaults.toml", true)
       .with_source(MyCustomSource::new())
       .build()?;
@@ -316,7 +316,7 @@ Values are coerced from strings to the most specific type:
 - `new(prefix: impl Into<String>, separator: impl Into<String>) -> Self` - Creates a new environment variable source.
   - `prefix` - The prefix that identifies relevant env vars (e.g., "MYAPP")
   - `separator` - The separator between path segments (e.g., "__"). Must not be empty.
-  - **Panics** if `separator` is empty.
+  - The constructor is infallible. An empty separator produces `ConfigError::InvalidSeparator` when `entries()` is called.
 
 ### `coerce_value` (private)
 
@@ -397,6 +397,7 @@ Variants:
 - `InvalidReferencePath(String)` - Invalid reference path
 - `NonScalarReference(String)` - Cannot reference non-scalar value
 - `UnclosedReference` - Unclosed reference (missing `}`)
+- `InvalidSeparator` - EnvSource separator is empty
 
 ---
 
@@ -408,7 +409,6 @@ Top-level error type for the dragon-fnd library.
 
 Variants:
 - `Config(ConfigError)` - Configuration error
-- `MissingConfig` - Application context requires a configuration
 
 ---
 
@@ -418,7 +418,7 @@ Application context for managing shared application state.
 
 ### `AppContext<C>`
 
-Central application context holding configuration and shared resources.
+Central application context holding configuration and subsystem handles.
 
 Generic over the configuration type `C`, which is deserialized once at build time.
 Access configuration via `config()` for zero-cost reads.
@@ -426,7 +426,7 @@ Access configuration via `config()` for zero-cost reads.
 #### Example
 
 ```rust
-use dragon_fnd::{AppContext, Config};
+use dragon_fnd::{AppContext, ConfigBuilder};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -437,11 +437,11 @@ struct MyConfig {
 
 let ctx = AppContext::builder()
     .with_config(
-        Config::builder()
+        ConfigBuilder::new()
             .with_file("config.toml", true)
             .build::<MyConfig>()?
     )
-    .build()?;
+    .build_sync();
 
 let config = ctx.config();  // &MyConfig, zero-cost
 ```
@@ -450,17 +450,18 @@ let config = ctx.config();  // &MyConfig, zero-cost
 
 - `config(&self) -> &C` - Returns a reference to the configuration. This is a zero-cost operation since the config was deserialized at build time.
 
-- `builder() -> AppContextBuilder<()>` - Creates a new builder for constructing an `AppContext`.
+- `builder() -> AppContextBuilder<NoConfig>` - Creates a new builder for constructing an `AppContext`.
 
-### `AppContextBuilder<C>`
+### `AppContextBuilder<Cfg, Async>`
 
-Builder for constructing an `AppContext`.
+Type-state builder for constructing an `AppContext`.
 
-The builder starts with no config (`AppContextBuilder<()>`) and transitions
-to `AppContextBuilder<C>` when `with_config` is called.
+The builder tracks two type-level dimensions:
+- `Cfg`: `NoConfig` → `Configured<C>` (via `with_config()`)
+- `Async`: `SyncBuild` (future async subsystems will add `AsyncBuild`)
 
 **Methods:**
 
-- `with_config<C>(self, config: C) -> AppContextBuilder<C>` - Attaches a configuration to the application context. The configuration should be the result of `Config::builder().build()`.
+- `with_config<C>(self, config: C) -> AppContextBuilder<Configured<C>, SyncBuild>` - Provides the application configuration. Only available when `Cfg = NoConfig`.
 
-- `build(self) -> Result<AppContext<C>, Error>` - Builds the `AppContext`. Returns an error if no configuration was provided.
+- `build_sync(self) -> AppContext<C>` - Builds the `AppContext`. Only available when config is provided (`Cfg = Configured<C>`) and no async subsystems are registered (`Async = SyncBuild`). This method is infallible — the type-state guarantees all requirements are met at compile time.

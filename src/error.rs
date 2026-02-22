@@ -6,7 +6,4 @@ use thiserror::Error;
 pub enum Error {
     #[error("configuration error: {0}")]
     Config(#[from] ConfigError),
-
-    #[error("application context requires a configuration")]
-    MissingConfig,
 }

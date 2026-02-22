@@ -185,6 +185,9 @@ fn get_value<'a>(table: &'a Table, path: &[String]) -> Result<&'a Value, ConfigE
     Ok(current)
 }
 
+// Structurally identical to get_value; duplicated because Rust's borrow
+// checker requires separate shared and mutable traversal paths.
+// If the navigation logic changes, update both functions.
 fn get_value_mut<'a>(table: &'a mut Table, path: &[String]) -> Result<&'a mut Value, ConfigError> {
     let err = || ConfigError::ReferenceNotFound(path.join("."));
 
@@ -203,7 +206,6 @@ fn get_value_mut<'a>(table: &'a mut Table, path: &[String]) -> Result<&'a mut Va
 
 /// Check if string is exactly `${path}` (full value substitution)
 fn is_pure_reference(s: &str) -> Option<&str> {
-    let s = s.trim();
     if s.starts_with("${") && s.ends_with('}') && s.matches("${").count() == 1 {
         Some(&s[2..s.len() - 1])
     } else {
@@ -267,5 +269,371 @@ fn value_to_string(value: &Value, path: &str) -> Result<String, ConfigError> {
         Value::Boolean(b) => Ok(b.to_string()),
         Value::Datetime(dt) => Ok(dt.to_string()),
         Value::Array(_) | Value::Table(_) => Err(ConfigError::NonScalarReference(path.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn table_from_toml(s: &str) -> Table {
+        toml::from_str(s).unwrap()
+    }
+
+    // --- Basic String Interpolation (4 tests) ---
+
+    #[test]
+    fn simple_reference() {
+        let mut table = table_from_toml(r#"
+            name = "world"
+            greeting = "hello ${name}"
+        "#);
+        resolve_references(&mut table).unwrap();
+        assert_eq!(table["greeting"].as_str(), Some("hello world"));
+    }
+
+    #[test]
+    fn multiple_references_in_one_string() {
+        let mut table = table_from_toml(r#"
+            host = "localhost"
+            port = 8080
+            url = "${host}:${port}"
+        "#);
+        resolve_references(&mut table).unwrap();
+        assert_eq!(table["url"].as_str(), Some("localhost:8080"));
+    }
+
+    #[test]
+    fn nested_path_reference() {
+        let mut table = table_from_toml(r#"
+            [database]
+            host = "db.example.com"
+
+            [app]
+            db_host = "${database.host}"
+        "#);
+        resolve_references(&mut table).unwrap();
+        assert_eq!(table["app"]["db_host"].as_str(), Some("db.example.com"));
+    }
+
+    #[test]
+    fn no_references_unchanged() {
+        let mut table = table_from_toml(r#"
+            name = "hello"
+            count = 42
+        "#);
+        resolve_references(&mut table).unwrap();
+        assert_eq!(table["name"].as_str(), Some("hello"));
+        assert_eq!(table["count"].as_integer(), Some(42));
+    }
+
+    // --- Full Value Substitution (6 tests) ---
+
+    #[test]
+    fn pure_reference_preserves_integer() {
+        let mut table = table_from_toml(r#"
+            default_port = 3000
+            port = "${default_port}"
+        "#);
+        resolve_references(&mut table).unwrap();
+        assert_eq!(table["port"].as_integer(), Some(3000));
+    }
+
+    #[test]
+    fn pure_reference_preserves_boolean() {
+        let mut table = table_from_toml(r#"
+            debug = true
+            verbose = "${debug}"
+        "#);
+        resolve_references(&mut table).unwrap();
+        assert_eq!(table["verbose"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn pure_reference_preserves_float() {
+        let mut table = table_from_toml(r#"
+            rate = 0.75
+            ratio = "${rate}"
+        "#);
+        resolve_references(&mut table).unwrap();
+        assert_eq!(table["ratio"].as_float(), Some(0.75));
+    }
+
+    #[test]
+    fn pure_reference_copies_array() {
+        let mut table = table_from_toml(r#"
+            tags = ["a", "b", "c"]
+            labels = "${tags}"
+        "#);
+        resolve_references(&mut table).unwrap();
+        let arr = table["labels"].as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0].as_str(), Some("a"));
+    }
+
+    #[test]
+    fn pure_reference_copies_table() {
+        let mut table = table_from_toml(r#"
+            [defaults]
+            host = "localhost"
+            port = 8080
+
+            [server]
+            config = "${defaults}"
+        "#);
+        resolve_references(&mut table).unwrap();
+        let config = table["server"]["config"].as_table().unwrap();
+        assert_eq!(config["host"].as_str(), Some("localhost"));
+        assert_eq!(config["port"].as_integer(), Some(8080));
+    }
+
+    #[test]
+    fn whitespace_around_reference_is_interpolation() {
+        let mut table = table_from_toml(r#"
+            value = "hello"
+            padded = "  ${value}  "
+        "#);
+        resolve_references(&mut table).unwrap();
+        assert_eq!(table["padded"].as_str(), Some("  hello  "));
+    }
+
+    // --- Chained References (3 tests) ---
+
+    #[test]
+    fn chained_references() {
+        let mut table = table_from_toml(r#"
+            c = "final"
+            b = "${c}"
+            a = "${b}"
+        "#);
+        resolve_references(&mut table).unwrap();
+        assert_eq!(table["a"].as_str(), Some("final"));
+    }
+
+    #[test]
+    fn chained_pure_references() {
+        let mut table = table_from_toml(r#"
+            c = 42
+            b = "${c}"
+            a = "${b}"
+        "#);
+        resolve_references(&mut table).unwrap();
+        assert_eq!(table["a"].as_integer(), Some(42));
+    }
+
+    #[test]
+    fn deep_chain() {
+        let mut table = table_from_toml(r#"
+            v5 = "end"
+            v4 = "${v5}"
+            v3 = "${v4}"
+            v2 = "${v3}"
+            v1 = "${v2}"
+        "#);
+        resolve_references(&mut table).unwrap();
+        assert_eq!(table["v1"].as_str(), Some("end"));
+    }
+
+    // --- Arrays (2 tests) ---
+
+    #[test]
+    fn references_in_array_elements() {
+        let mut table = table_from_toml(r#"
+            host = "localhost"
+            port = 8080
+            urls = ["http://${host}", "port: ${port}"]
+        "#);
+        resolve_references(&mut table).unwrap();
+        let arr = table["urls"].as_array().unwrap();
+        assert_eq!(arr[0].as_str(), Some("http://localhost"));
+        assert_eq!(arr[1].as_str(), Some("port: 8080"));
+    }
+
+    #[test]
+    fn pure_reference_in_array() {
+        let mut table = table_from_toml(r#"
+            default_port = 3000
+            ports = ["${default_port}"]
+        "#);
+        resolve_references(&mut table).unwrap();
+        let arr = table["ports"].as_array().unwrap();
+        assert_eq!(arr[0].as_integer(), Some(3000));
+    }
+
+    // --- Escape Sequences (3 tests) ---
+
+    #[test]
+    fn escaped_dollar_sign_with_reference() {
+        let mut table = table_from_toml(r#"
+            name = "world"
+            msg = "$$hello ${name}"
+        "#);
+        resolve_references(&mut table).unwrap();
+        assert_eq!(table["msg"].as_str(), Some("$hello world"));
+    }
+
+    #[test]
+    fn mixed_escaped_and_reference() {
+        let mut table = table_from_toml(r#"
+            amount = 50
+            price = "$$${amount}"
+        "#);
+        resolve_references(&mut table).unwrap();
+        assert_eq!(table["price"].as_str(), Some("$50"));
+    }
+
+    #[test]
+    fn string_without_references_unchanged() {
+        let mut table = table_from_toml(r#"
+            text = "$$not_a_ref"
+        "#);
+        resolve_references(&mut table).unwrap();
+        // $$ without actual ${} references — string is not processed
+        assert_eq!(table["text"].as_str(), Some("$$not_a_ref"));
+    }
+
+    // --- Type Coercion in Interpolation (2 tests) ---
+
+    #[test]
+    fn integer_to_string_in_interpolation() {
+        let mut table = table_from_toml(r#"
+            port = 8080
+            msg = "port ${port}"
+        "#);
+        resolve_references(&mut table).unwrap();
+        assert_eq!(table["msg"].as_str(), Some("port 8080"));
+    }
+
+    #[test]
+    fn boolean_to_string_in_interpolation() {
+        let mut table = table_from_toml(r#"
+            enabled = true
+            msg = "debug: ${enabled}"
+        "#);
+        resolve_references(&mut table).unwrap();
+        assert_eq!(table["msg"].as_str(), Some("debug: true"));
+    }
+
+    // --- Error Cases (12 tests) ---
+
+    #[test]
+    fn circular_reference_detected() {
+        let mut table = table_from_toml(r#"
+            a = "${b}"
+            b = "${a}"
+        "#);
+        let err = resolve_references(&mut table).unwrap_err();
+        assert!(matches!(err, ConfigError::CircularReference));
+    }
+
+    #[test]
+    fn self_reference_detected() {
+        let mut table = table_from_toml(r#"
+            a = "${a}"
+        "#);
+        let err = resolve_references(&mut table).unwrap_err();
+        assert!(matches!(err, ConfigError::CircularReference));
+    }
+
+    #[test]
+    fn three_way_cycle_detected() {
+        let mut table = table_from_toml(r#"
+            a = "${b}"
+            b = "${c}"
+            c = "${a}"
+        "#);
+        let err = resolve_references(&mut table).unwrap_err();
+        assert!(matches!(err, ConfigError::CircularReference));
+    }
+
+    #[test]
+    fn reference_not_found() {
+        let mut table = table_from_toml(r#"
+            a = "${nonexistent}"
+        "#);
+        let err = resolve_references(&mut table).unwrap_err();
+        assert!(matches!(err, ConfigError::ReferenceNotFound(_)));
+    }
+
+    #[test]
+    fn nested_reference_not_found() {
+        let mut table = table_from_toml(r#"
+            [database]
+            host = "localhost"
+
+            [app]
+            url = "${database.port}"
+        "#);
+        let err = resolve_references(&mut table).unwrap_err();
+        assert!(matches!(err, ConfigError::ReferenceNotFound(_)));
+    }
+
+    #[test]
+    fn unclosed_reference_with_valid_reference() {
+        let mut table = table_from_toml(r#"
+            name = "world"
+            msg = "${name} ${unclosed"
+        "#);
+        let err = resolve_references(&mut table).unwrap_err();
+        assert!(matches!(err, ConfigError::UnclosedReference));
+    }
+
+    #[test]
+    fn unclosed_reference_alone() {
+        let mut table = table_from_toml(r#"
+            a = "${unclosed"
+        "#);
+        let err = resolve_references(&mut table).unwrap_err();
+        assert!(matches!(err, ConfigError::UnclosedReference));
+    }
+
+    #[test]
+    fn unclosed_reference_in_nested_table() {
+        let mut table = table_from_toml(r#"
+            [server]
+            url = "${unclosed"
+        "#);
+        let err = resolve_references(&mut table).unwrap_err();
+        assert!(matches!(err, ConfigError::UnclosedReference));
+    }
+
+    #[test]
+    fn unclosed_reference_in_array() {
+        let mut table = table_from_toml(r#"
+            items = ["${unclosed"]
+        "#);
+        let err = resolve_references(&mut table).unwrap_err();
+        assert!(matches!(err, ConfigError::UnclosedReference));
+    }
+
+    #[test]
+    fn non_scalar_in_interpolation() {
+        let mut table = table_from_toml(r#"
+            [nested]
+            key = "value"
+
+            msg = "text ${nested}"
+        "#);
+        let err = resolve_references(&mut table).unwrap_err();
+        assert!(matches!(err, ConfigError::NonScalarReference(_)));
+    }
+
+    #[test]
+    fn array_in_interpolation() {
+        let mut table = table_from_toml(r#"
+            items = [1, 2, 3]
+            msg = "items: ${items}"
+        "#);
+        let err = resolve_references(&mut table).unwrap_err();
+        assert!(matches!(err, ConfigError::NonScalarReference(_)));
+    }
+
+    #[test]
+    fn invalid_path_empty_segment() {
+        let mut table = table_from_toml(r#"
+            a = "${x..y}"
+        "#);
+        let err = resolve_references(&mut table).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidReferencePath(_)));
     }
 }

@@ -1,4 +1,4 @@
-use dragon_fnd::{AppContext, Config};
+use dragon_fnd::{AppContext, ConfigBuilder};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -26,12 +26,12 @@ fn main() -> Result<(), dragon_fnd::Error> {
     // Deserialize once at build time
     let ctx = AppContext::builder()
         .with_config(
-            Config::builder()
+            ConfigBuilder::new()
                 .with_file("examples/default.toml", true)
                 .with_file("examples/dev.toml", false)
                 .build::<AppConfig>()?,
         )
-        .build()?;
+        .build_sync();
 
     // Zero-cost reference access
     let config = ctx.config();

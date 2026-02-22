@@ -49,3 +49,38 @@ fn load_config_file(path: &Path, required: bool) -> Result<Option<toml::Table>, 
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_source_loads_valid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[server]\nport = 8080\n").unwrap();
+
+        let source = FileSource::new(&path, true);
+        let entries = source.entries().unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].path.is_empty());
+        assert_eq!(entries[0].value["server"]["port"].as_integer(), Some(8080));
+    }
+
+    #[test]
+    fn file_source_required_missing() {
+        let source = FileSource::new("/nonexistent/path/config.toml", true);
+        let err = source.entries().unwrap_err();
+
+        assert!(matches!(err, ConfigError::FileNotFound(_)));
+    }
+
+    #[test]
+    fn file_source_optional_missing() {
+        let source = FileSource::new("/nonexistent/path/config.toml", false);
+        let entries = source.entries().unwrap();
+
+        assert!(entries.is_empty());
+    }
+}

@@ -6,7 +6,7 @@ This document captures what dragon-fnd will become — the subsystems on the hor
 
 ## What's Already Built
 
-The config subsystem is complete: `ConfigSource` trait for extensible input channels, `FileSource` (TOML files), `EnvSource` (environment variables with prefix/separator), a `Config` builder with fluent API and generic `build::<T>()`, and graph-based `${path.to.field}` variable resolution with topological sort, cycle detection, and full value substitution. An `AppContext<C>` skeleton exists with a type-state builder. See DESIGN.md for full details. What follows is everything that's still ahead.
+The config subsystem is complete: `ConfigSource` trait for extensible input channels, `FileSource` (TOML files), `EnvSource` (environment variables with prefix/separator), a `ConfigBuilder` with fluent API and generic `build::<T>()`, and graph-based `${path.to.field}` variable resolution with topological sort, cycle detection, and full value substitution. `AppContext<C>` uses a type-state builder with compile-time enforcement — `build_sync()` is infallible and only available when config is provided. Feature flag infrastructure is in place. See DESIGN.md for full details. What follows is everything that's still ahead.
 
 ---
 
