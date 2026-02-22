@@ -83,6 +83,31 @@ fn builder_with_custom_source() {
     assert_eq!(config.port, 4000);
 }
 
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct ResolvedConfig {
+    host: String,
+    url: String,
+}
+
+#[test]
+fn builder_resolves_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "host = \"localhost\"\nurl = \"http://${host}:8080\"\n",
+    )
+    .unwrap();
+
+    let config: ResolvedConfig = ConfigBuilder::new()
+        .with_file(&path, true)
+        .build()
+        .unwrap();
+
+    assert_eq!(config.url, "http://localhost:8080");
+}
+
 #[test]
 fn builder_error_propagates_from_source() {
     let result = ConfigBuilder::new()

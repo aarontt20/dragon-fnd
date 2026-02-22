@@ -77,6 +77,18 @@ mod tests {
     }
 
     #[test]
+    fn file_source_parse_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(&path, "this is not [valid toml").unwrap();
+
+        let source = FileSource::new(&path, true);
+        let err = source.entries().unwrap_err();
+
+        assert!(matches!(err, ConfigError::ParseError { .. }));
+    }
+
+    #[test]
     fn file_source_optional_missing() {
         let source = FileSource::new("/nonexistent/path/config.toml", false);
         let entries = source.entries().unwrap();

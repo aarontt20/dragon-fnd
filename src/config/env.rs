@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn coerce_float() {
-        assert_eq!(coerce_value("3.14"), Value::Float(3.14));
+        assert_eq!(coerce_value("3.15"), Value::Float(3.15));
         assert_eq!(coerce_value("-1.5"), Value::Float(-1.5));
         assert_eq!(coerce_value("0.0"), Value::Float(0.0));
     }
