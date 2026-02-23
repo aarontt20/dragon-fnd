@@ -76,7 +76,14 @@ fn coerce_value(s: &str) -> Value {
 
 fn looks_like_integer(s: &str) -> bool {
     let s = s.strip_prefix('-').unwrap_or(s);
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())
+    if s.is_empty() {
+        return false;
+    }
+    // Reject leading zeros (match TOML rules: 007 is not a valid integer)
+    if s.len() > 1 && s.starts_with('0') {
+        return false;
+    }
+    s.chars().all(|c| c.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -135,7 +142,16 @@ mod tests {
     #[test]
     fn coerce_string() {
         assert_eq!(coerce_value("hello"), Value::String("hello".into()));
-        assert_eq!(coerce_value("007"), Value::Integer(7));
+        assert_eq!(coerce_value("007"), Value::String("007".into()));
+    }
+
+    #[test]
+    fn coerce_leading_zero_stays_string() {
+        assert_eq!(coerce_value("007"), Value::String("007".into()));
+        assert_eq!(coerce_value("01"), Value::String("01".into()));
+        assert_eq!(coerce_value("-01"), Value::String("-01".into()));
+        // Single zero is fine
+        assert_eq!(coerce_value("0"), Value::Integer(0));
     }
 
     #[test]

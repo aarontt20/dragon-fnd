@@ -7,40 +7,47 @@ use toml::{Table, Value};
 type ConfigPath = Vec<String>;
 
 pub fn resolve_references(table: &mut Table) -> Result<(), ConfigError> {
-    // Phase 1: Collect all references as (source_path, target_path) pairs
-    let references = collect_references(table)?;
+    // Phase 1: Collect all references as (source_path, target_path) pairs,
+    // and separately track paths with $$ escapes but no ${...} references
+    let (references, escape_only) = collect_references(table)?;
 
-    if references.is_empty() {
-        return Ok(());
+    if !references.is_empty() {
+        // Phase 2: Build dependency graph and topologically sort
+        let resolution_order = topological_sort(&references)?;
+
+        // Phase 3: Resolve in dependency order
+        for path in resolution_order {
+            resolve_at_path(table, &path)?;
+        }
     }
 
-    // Phase 2: Build dependency graph and topologically sort
-    let resolution_order = topological_sort(&references)?;
-
-    // Phase 3: Resolve in dependency order
-    for path in resolution_order {
-        resolve_at_path(table, &path)?;
+    // Phase 4: Process escape-only strings ($$ -> $ for strings without references)
+    for path in &escape_only {
+        resolve_escapes_at_path(table, path);
     }
 
     Ok(())
 }
 
 /// Collect all references from the config tree
-fn collect_references(table: &Table) -> Result<Vec<(ConfigPath, ConfigPath)>, ConfigError> {
+#[allow(clippy::type_complexity)] // Inlined into resolve_references in a later commit
+fn collect_references(table: &Table) -> Result<(Vec<(ConfigPath, ConfigPath)>, Vec<ConfigPath>), ConfigError> {
     let mut refs = Vec::new();
+    let mut escape_only = Vec::new();
     let mut path = Vec::new();
-    collect_from_table(table, &mut path, &mut refs)?;
-    Ok(refs)
+    collect_from_table(table, &mut path, &mut refs, &mut escape_only)?;
+    Ok((refs, escape_only))
 }
 
 fn collect_from_table(
     table: &Table,
     path: &mut ConfigPath,
     refs: &mut Vec<(ConfigPath, ConfigPath)>,
+    escape_only: &mut Vec<ConfigPath>,
 ) -> Result<(), ConfigError> {
     for (key, val) in table {
         path.push(key.clone());
-        collect_from_value(val, path, refs)?;
+        collect_from_value(val, path, refs, escape_only)?;
         path.pop();
     }
     Ok(())
@@ -50,24 +57,39 @@ fn collect_from_value(
     value: &Value,
     path: &mut ConfigPath,
     refs: &mut Vec<(ConfigPath, ConfigPath)>,
+    escape_only: &mut Vec<ConfigPath>,
 ) -> Result<(), ConfigError> {
     match value {
         Value::String(s) => {
-            for target in parse_references(s)? {
-                refs.push((path.clone(), target));
+            let targets = parse_references(s)?;
+            if targets.is_empty() {
+                if s.contains("$$") {
+                    escape_only.push(path.clone());
+                }
+            } else {
+                for target in targets {
+                    refs.push((path.clone(), target));
+                }
             }
         }
-        Value::Table(t) => collect_from_table(t, path, refs)?,
+        Value::Table(t) => collect_from_table(t, path, refs, escape_only)?,
         Value::Array(arr) => {
             for (i, val) in arr.iter().enumerate() {
                 path.push(i.to_string());
-                collect_from_value(val, path, refs)?;
+                collect_from_value(val, path, refs, escape_only)?;
                 path.pop();
             }
         }
         _ => {}
     }
     Ok(())
+}
+
+/// Replace $$ with $ in a string value at the given path (no reference resolution).
+fn resolve_escapes_at_path(table: &mut Table, path: &[String]) {
+    if let Ok(Value::String(s)) = get_value_mut(table, path) {
+        *s = s.replace("$$", "$");
+    }
 }
 
 /// Parse all ${...} references from a string
@@ -501,13 +523,23 @@ mod tests {
     }
 
     #[test]
-    fn string_without_references_unchanged() {
+    fn escape_without_references_is_processed() {
         let mut table = table_from_toml(r#"
             text = "$$not_a_ref"
         "#);
         resolve_references(&mut table).unwrap();
-        // $$ without actual ${} references — string is not processed
-        assert_eq!(table["text"].as_str(), Some("$$not_a_ref"));
+        assert_eq!(table["text"].as_str(), Some("$not_a_ref"));
+    }
+
+    #[test]
+    fn escape_only_in_array() {
+        let mut table = table_from_toml(r#"
+            items = ["$$100", "no_escape"]
+        "#);
+        resolve_references(&mut table).unwrap();
+        let arr = table["items"].as_array().unwrap();
+        assert_eq!(arr[0].as_str(), Some("$100"));
+        assert_eq!(arr[1].as_str(), Some("no_escape"));
     }
 
     // --- Type Coercion in Interpolation (2 tests) ---
