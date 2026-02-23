@@ -22,6 +22,9 @@ pub enum ConfigError {
     #[error("failed to deserialize config: {0}")]
     DeserializeError(#[from] toml::de::Error),
 
+    #[error("root-level config entry must be a table, got {0}")]
+    RootNotTable(String),
+
     #[error("circular reference detected in configuration")]
     CircularReference,
 

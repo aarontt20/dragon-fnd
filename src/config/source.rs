@@ -25,13 +25,14 @@ pub trait ConfigSource: Send + Sync + std::fmt::Debug {
     fn entries(&self) -> Result<Vec<ConfigEntry>, ConfigError>;
 }
 
-pub fn merge_at_path(table: &mut Table, path: &[String], value: Value) {
+pub fn merge_at_path(table: &mut Table, path: &[String], value: Value) -> Result<(), ConfigError> {
     let Some((first, rest)) = path.split_first() else {
         // Root-level merge: deep merge if value is a table
         if let Value::Table(overlay) = value {
             deep_merge(table, overlay);
+            return Ok(());
         }
-        return;
+        return Err(ConfigError::RootNotTable(value_kind(&value).to_string()));
     };
 
     if rest.is_empty() {
@@ -44,7 +45,7 @@ pub fn merge_at_path(table: &mut Table, path: &[String], value: Value) {
                 table.insert(first.clone(), value);
             }
         }
-        return;
+        return Ok(());
     }
 
     // More path segments remain: ensure intermediate table exists
@@ -53,7 +54,21 @@ pub fn merge_at_path(table: &mut Table, path: &[String], value: Value) {
     }
 
     if let Some(Value::Table(nested)) = table.get_mut(first) {
-        merge_at_path(nested, rest, value);
+        merge_at_path(nested, rest, value)?;
+    }
+
+    Ok(())
+}
+
+fn value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::String(_) => "string",
+        Value::Integer(_) => "integer",
+        Value::Float(_) => "float",
+        Value::Boolean(_) => "boolean",
+        Value::Datetime(_) => "datetime",
+        Value::Array(_) => "array",
+        Value::Table(_) => "table",
     }
 }
 
@@ -90,7 +105,7 @@ mod tests {
         overlay_nested.insert("extra".into(), Value::String("merged".into()));
         overlay.insert("nested".into(), Value::Table(overlay_nested));
 
-        merge_at_path(&mut table, &[], Value::Table(overlay));
+        merge_at_path(&mut table, &[], Value::Table(overlay)).unwrap();
 
         assert_eq!(table["existing"].as_str(), Some("kept"));
         assert_eq!(table["new_key"].as_str(), Some("added"));
@@ -99,11 +114,18 @@ mod tests {
     }
 
     #[test]
+    fn merge_at_empty_path_non_table_returns_error() {
+        let mut table = Table::new();
+        let err = merge_at_path(&mut table, &[], Value::String("not a table".into())).unwrap_err();
+        assert!(matches!(err, ConfigError::RootNotTable(_)));
+    }
+
+    #[test]
     fn merge_at_path_creates_intermediates() {
         let mut table = Table::new();
         let path: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
 
-        merge_at_path(&mut table, &path, Value::String("deep".into()));
+        merge_at_path(&mut table, &path, Value::String("deep".into())).unwrap();
 
         assert_eq!(table["a"]["b"]["c"].as_str(), Some("deep"));
     }
@@ -114,7 +136,7 @@ mod tests {
         table.insert("key".into(), Value::String("old".into()));
 
         let path: Vec<String> = vec!["key".into()];
-        merge_at_path(&mut table, &path, Value::String("new".into()));
+        merge_at_path(&mut table, &path, Value::String("new".into())).unwrap();
 
         assert_eq!(table["key"].as_str(), Some("new"));
     }
@@ -130,7 +152,7 @@ mod tests {
         overlay.insert("b".into(), Value::String("2".into()));
 
         let path: Vec<String> = vec!["key".into()];
-        merge_at_path(&mut table, &path, Value::Table(overlay));
+        merge_at_path(&mut table, &path, Value::Table(overlay)).unwrap();
 
         assert_eq!(table["key"]["a"].as_str(), Some("1"));
         assert_eq!(table["key"]["b"].as_str(), Some("2"));

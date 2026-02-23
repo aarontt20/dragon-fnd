@@ -172,9 +172,10 @@ fn resolve_at_path(table: &mut Table, path: &[String]) -> Result<(), ConfigError
 fn get_value<'a>(table: &'a Table, path: &[String]) -> Result<&'a Value, ConfigError> {
     let err = || ConfigError::ReferenceNotFound(path.join("."));
 
-    let mut current: &Value = table.get(&path[0]).ok_or_else(err)?;
+    let (first, rest) = path.split_first().ok_or_else(err)?;
+    let mut current: &Value = table.get(first).ok_or_else(err)?;
 
-    for segment in &path[1..] {
+    for segment in rest {
         current = match current {
             Value::Table(t) => t.get(segment).ok_or_else(err)?,
             Value::Array(arr) => arr.get(segment.parse::<usize>().map_err(|_| err())?).ok_or_else(err)?,
@@ -191,9 +192,10 @@ fn get_value<'a>(table: &'a Table, path: &[String]) -> Result<&'a Value, ConfigE
 fn get_value_mut<'a>(table: &'a mut Table, path: &[String]) -> Result<&'a mut Value, ConfigError> {
     let err = || ConfigError::ReferenceNotFound(path.join("."));
 
-    let mut current: &mut Value = table.get_mut(&path[0]).ok_or_else(err)?;
+    let (first, rest) = path.split_first().ok_or_else(err)?;
+    let mut current: &mut Value = table.get_mut(first).ok_or_else(err)?;
 
-    for segment in &path[1..] {
+    for segment in rest {
         current = match current {
             Value::Table(t) => t.get_mut(segment).ok_or_else(err)?,
             Value::Array(arr) => arr.get_mut(segment.parse::<usize>().map_err(|_| err())?).ok_or_else(err)?,
@@ -637,6 +639,16 @@ mod tests {
         "#);
         let err = resolve_references(&mut table).unwrap_err();
         assert!(matches!(err, ConfigError::NonScalarReference(_)));
+    }
+
+    #[test]
+    fn get_value_empty_path_returns_error() {
+        let table = table_from_toml(r#"
+            name = "hello"
+        "#);
+        let empty: Vec<String> = vec![];
+        let err = get_value(&table, &empty).unwrap_err();
+        assert!(matches!(err, ConfigError::ReferenceNotFound(_)));
     }
 
     #[test]
