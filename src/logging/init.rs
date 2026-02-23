@@ -39,12 +39,9 @@ pub(crate) fn init_logging(config: &LoggingConfig) -> Result<Option<WorkerGuard>
                 "compression with time-based rotation is not yet supported".to_string(),
             ));
         }
-        if config.file.compress
-            && config.file.max_bytes.is_none()
-            && config.file.rotation == Rotation::Never
-        {
+        if config.file.compress && config.file.max_bytes.is_none() {
             return Err(LoggingError::InvalidRotation(
-                "compress requires rotation to be enabled (set max_bytes or a time-based rotation)"
+                "compress requires max_bytes to be set (time-based rotation compression is not yet supported)"
                     .to_string(),
             ));
         }

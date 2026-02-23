@@ -7,14 +7,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `docs/DESIGN.md` — How the built system works (architecture, current state)
 - `docs/VISION.md` — Where the project is going (planned subsystems, design philosophy)
 - `DOC.md` — API documentation
-- `TEST.md` — Test coverage documentation (113 unit + 11 integration + 2 doc-tests with logging feature)
+- `TEST.md` — Test coverage documentation (113 unit + 19 integration + 2 doc-tests with logging feature)
 
 ## Build Commands
 
 ```bash
 cargo build              # Build the library
 cargo test               # Run all tests (58 unit + 8 integration + 2 doc-tests)
-cargo test --features logging  # Run all tests including logging (113 unit + 11 integration + 2 doc-tests)
+cargo test --features logging  # Run all tests including logging (113 unit + 19 integration + 2 doc-tests)
 cargo test resolve       # Run tests matching "resolve"
 cargo clippy             # Run linter
 cargo doc --open         # Generate and view documentation

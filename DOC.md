@@ -500,7 +500,7 @@ Serde-deserializable logging configuration. Top-level fields:
 - `rotation: Rotation` (default: `Daily`)
 - `filter: Option<String>` — optional per-layer filter override
 - `max_bytes: Option<u64>` — size-based rotation threshold (minimum 4096); cannot combine with time-based rotation
-- `compress: bool` (default: `false`) — gzip rotated files in background thread; requires `max_bytes` or time-based rotation
+- `compress: bool` (default: `false`) — gzip rotated files in background thread; requires `max_bytes` (time-based rotation compression is not yet supported)
 - `retain_days: Option<u32>` — delete files older than N days
 - `retain_files: Option<u32>` — keep only N most recent files
 

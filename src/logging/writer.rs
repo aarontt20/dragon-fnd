@@ -55,8 +55,11 @@ impl SizeRotatingWriter {
 
         let bytes_written = file
             .metadata()
-            .map(|m| m.len())
-            .unwrap_or(0);
+            .map_err(|e| LoggingError::FileSetupFailed {
+                dir: dir.clone(),
+                source: e,
+            })?
+            .len();
 
         Ok(Self {
             file,
@@ -130,7 +133,14 @@ impl SizeRotatingWriter {
         }
 
         if self.compress {
+            // Run retention inside the compression thread so it executes after
+            // the .gz file is written. This prevents a race where retention
+            // deletes the uncompressed file before compression reads it.
             let path = rotated_path.clone();
+            let dir = self.dir.clone();
+            let prefix = self.prefix.clone();
+            let retain_days = self.retain_days;
+            let retain_files = self.retain_files;
             std::thread::spawn(move || {
                 if let Err(e) = compress_file(&path) {
                     eprintln!(
@@ -138,20 +148,27 @@ impl SizeRotatingWriter {
                         path.display()
                     );
                 }
+                for (p, err) in retain::cleanup_old_logs(&dir, &prefix, retain_days, retain_files)
+                {
+                    eprintln!(
+                        "dragon-fnd: failed to remove old log file '{}': {err}",
+                        p.display()
+                    );
+                }
             });
-        }
-
-        let errors = retain::cleanup_old_logs(
-            &self.dir,
-            &self.prefix,
-            self.retain_days,
-            self.retain_files,
-        );
-        for (path, err) in errors {
-            eprintln!(
-                "dragon-fnd: failed to remove old log file '{}': {err}",
-                path.display()
+        } else {
+            let errors = retain::cleanup_old_logs(
+                &self.dir,
+                &self.prefix,
+                self.retain_days,
+                self.retain_files,
             );
+            for (path, err) in errors {
+                eprintln!(
+                    "dragon-fnd: failed to remove old log file '{}': {err}",
+                    path.display()
+                );
+            }
         }
     }
 
@@ -173,14 +190,14 @@ impl SizeRotatingWriter {
         }
 
         // Collision fallback: append .1, .2, etc.
-        for suffix in 1u32.. {
+        for suffix in 1u32..=u32::MAX {
             let candidate = self.dir.join(format!("{base}.{suffix}"));
             if !candidate.exists() {
                 return Ok(candidate);
             }
         }
 
-        unreachable!("exhausted u32 collision suffixes")
+        Err(io::Error::other("exhausted collision suffixes for rotated log file"))
     }
 }
 
@@ -207,12 +224,24 @@ fn compress_file(path: &Path) -> io::Result<()> {
     gz_name.push(".gz");
     let gz_path = PathBuf::from(gz_name);
 
-    let input = File::open(path)?;
-    let mut reader = io::BufReader::new(input);
-    let out_file = File::create(&gz_path)?;
-    let mut encoder = GzEncoder::new(out_file, Compression::default());
-    io::copy(&mut reader, &mut encoder)?;
-    encoder.finish()?;
+    let result = (|| -> io::Result<()> {
+        let input = File::open(path)?;
+        let mut reader = io::BufReader::new(input);
+        let out_file = File::create(&gz_path)?;
+        let mut encoder = GzEncoder::new(out_file, Compression::default());
+        io::copy(&mut reader, &mut encoder)?;
+        encoder.finish()?;
+        Ok(())
+    })();
+
+    if let Err(e) = &result {
+        // Clean up partial .gz file so it doesn't occupy a retention slot
+        let _ = fs::remove_file(&gz_path);
+        return Err(io::Error::other(format!(
+            "compression failed for '{}': {e}",
+            path.display()
+        )));
+    }
 
     // Delete original; silently ignore NotFound (retention may have already removed it)
     if let Err(e) = fs::remove_file(path) {
@@ -403,18 +432,27 @@ mod tests {
 
         writer.write_all(b"0123456789X").unwrap();
 
-        // Wait for background compression thread
-        std::thread::sleep(std::time::Duration::from_millis(500));
-
-        let gz_files: Vec<_> = fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .ends_with(".gz")
-            })
-            .collect();
+        // Poll for background compression thread to finish
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let gz_files = loop {
+            let found: Vec<_> = fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .ends_with(".gz")
+                })
+                .collect();
+            if !found.is_empty() {
+                break found;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for compression"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
         assert_eq!(gz_files.len(), 1, "should have one .gz file");
 
         // Original uncompressed rotated file should be deleted

@@ -12,6 +12,11 @@ pub(crate) fn cleanup_old_logs(
     retain_days: Option<u32>,
     retain_files: Option<u32>,
 ) -> Vec<(PathBuf, std::io::Error)> {
+    debug_assert!(
+        !(retain_days.is_some() && retain_files.is_some()),
+        "retain_days and retain_files are mutually exclusive"
+    );
+
     let mut errors = Vec::new();
 
     let entries = match fs::read_dir(dir) {

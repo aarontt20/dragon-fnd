@@ -3,7 +3,7 @@
 Tests are inline (`#[cfg(test)]` modules in source files) plus integration tests in `tests/`.
 
 **Without logging feature: 58 unit tests + 8 integration tests + 2 doc-tests = 68 tests**
-**With logging feature: 113 unit tests + 11 integration tests + 2 doc-tests = 126 tests**
+**With logging feature: 113 unit tests + 19 integration tests + 2 doc-tests = 134 tests**
 
 ---
 
@@ -293,7 +293,7 @@ End-to-end tests for logging integration with AppContext (`tests/logging_init.rs
 
 ---
 
-## Integration Tests: `config_builder` (4 tests)
+## Integration Tests: `config_builder` (5 tests)
 
 End-to-end tests for `ConfigBuilder` (`tests/config_builder.rs`).
 
@@ -302,6 +302,7 @@ End-to-end tests for `ConfigBuilder` (`tests/config_builder.rs`).
 | `builder_with_file_deserializes` | File → typed config | TOML file loaded and deserialized into struct |
 | `builder_multiple_sources_override` | Source ordering | Later sources override earlier sources |
 | `builder_with_custom_source` | Custom `ConfigSource` | User-defined source integrates via `with_source()` |
+| `builder_resolves_references` | Variable resolution | `${path}` references resolved during `build()` |
 | `builder_error_propagates_from_source` | Error propagation | Source errors surface through `build()` |
 
 ---

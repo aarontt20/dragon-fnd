@@ -212,6 +212,9 @@ mod tests {
 
     #[test]
     fn full_toml_round_trip() {
+        // Note: this config combines max_bytes with rotation="hourly", which is
+        // rejected at init time. This is intentional — the test verifies that
+        // deserialization is permissive; validation is deferred to init_logging().
         let config: LoggingConfig = toml::from_str(
             r#"
             enabled = true

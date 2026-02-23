@@ -334,7 +334,7 @@ No async runtime. No CLI parser.
 - **Deserialization at build time** — The merged TOML table is deserialized once into `T`. After `build()`, config access is a plain struct field reference.
 - **Explicit error handling** — No panics in library code. All fallible operations return `Result`. All validation deferred to `entries()` for consistent error flow through `build()`.
 - **Compile-time safety** — The AppContext builder uses type-state to enforce that config is provided and async requirements are met. Invalid usage is rejected by the compiler, not at runtime.
-- **Minimal dependency surface** — Three crates, all widely used and stable.
+- **Minimal dependency surface** — Three always-on crates plus five optional behind the `logging` feature, all widely used and stable.
 
 ---
 
