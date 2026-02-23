@@ -94,7 +94,7 @@ fn invalid_retention_skipped_when_file_disabled() {
     config.file.retain_files = Some(10);
 
     let result = AppContext::builder()
-        .with_logging(LoggingBuilder::from_config(&config))
+        .with_logging(LoggingBuilder::from_config(config))
         .with_config("test".to_string())
         .build_sync();
 
@@ -109,7 +109,7 @@ fn invalid_retention_config_errors() {
     config.file.retain_files = Some(10);
 
     let result = AppContext::builder()
-        .with_logging(LoggingBuilder::from_config(&config))
+        .with_logging(LoggingBuilder::from_config(config))
         .with_config("test".to_string())
         .build_sync();
 

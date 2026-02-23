@@ -22,10 +22,8 @@ impl LoggingBuilder {
     }
 
     /// Creates a builder from a deserialized config, allowing further overrides.
-    pub fn from_config(config: &LoggingConfig) -> Self {
-        Self {
-            config: config.clone(),
-        }
+    pub fn from_config(config: LoggingConfig) -> Self {
+        Self { config }
     }
 
     /// Override the base filter directive (e.g. `"debug"`, `"info,hyper=warn"`).
@@ -203,7 +201,7 @@ mod tests {
         )
         .unwrap();
 
-        let builder = LoggingBuilder::from_config(&config);
+        let builder = LoggingBuilder::from_config(config);
         let result = builder.into_config();
         assert_eq!(result.filter, "debug");
         assert_eq!(result.modules["sqlx"], "warn");

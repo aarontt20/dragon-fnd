@@ -125,10 +125,10 @@ impl<Cfg, A> std::fmt::Debug for AppContextBuilder<Cfg, A> {
     }
 }
 
-impl AppContextBuilder<NoConfig, SyncBuild> {
+impl<A> AppContextBuilder<NoConfig, A> {
     /// Provides the application configuration, transitioning the builder
     /// from `NoConfig` to `Configured<C>`.
-    pub fn with_config<C>(self, config: C) -> AppContextBuilder<Configured<C>, SyncBuild> {
+    pub fn with_config<C>(self, config: C) -> AppContextBuilder<Configured<C>, A> {
         AppContextBuilder {
             cfg: Configured(config),
             _async: PhantomData,
