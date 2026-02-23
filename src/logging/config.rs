@@ -66,6 +66,12 @@ pub struct FileConfig {
     /// Optional per-layer filter override.
     pub filter: Option<String>,
     pub rotation: Rotation,
+    /// Maximum size in bytes before rotating the active log file.
+    /// When set, `rotation` must be `Never` (time + size composition is not yet supported).
+    pub max_bytes: Option<u64>,
+    /// Whether to gzip-compress rotated log files. Requires rotation to be enabled
+    /// (either via `max_bytes` or a time-based `rotation` other than `Never`).
+    pub compress: bool,
     /// Delete log files older than this many days. Mutually exclusive with `retain_files`.
     pub retain_days: Option<u32>,
     /// Keep only this many most recent log files. Mutually exclusive with `retain_days`.
@@ -81,6 +87,8 @@ impl Default for FileConfig {
             format: LogFormat::Json,
             filter: None,
             rotation: Rotation::Daily,
+            max_bytes: None,
+            compress: false,
             retain_days: None,
             retain_files: None,
         }
@@ -122,6 +130,8 @@ mod tests {
         assert_eq!(config.file.prefix, "app");
         assert_eq!(config.file.format, LogFormat::Json);
         assert_eq!(config.file.rotation, Rotation::Daily);
+        assert!(config.file.max_bytes.is_none());
+        assert!(!config.file.compress);
         assert!(config.file.retain_days.is_none());
         assert!(config.file.retain_files.is_none());
     }
@@ -177,6 +187,30 @@ mod tests {
     }
 
     #[test]
+    fn max_bytes_parses() {
+        let config: LoggingConfig = toml::from_str(
+            r#"
+            [file]
+            max_bytes = 10485760
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.file.max_bytes, Some(10_485_760));
+    }
+
+    #[test]
+    fn compress_parses() {
+        let config: LoggingConfig = toml::from_str(
+            r#"
+            [file]
+            compress = true
+            "#,
+        )
+        .unwrap();
+        assert!(config.file.compress);
+    }
+
+    #[test]
     fn full_toml_round_trip() {
         let config: LoggingConfig = toml::from_str(
             r#"
@@ -196,6 +230,8 @@ mod tests {
             format = "json"
             filter = "debug"
             rotation = "hourly"
+            max_bytes = 52428800
+            compress = true
             retain_days = 30
             "#,
         )
@@ -215,6 +251,8 @@ mod tests {
         assert_eq!(config.file.format, LogFormat::Json);
         assert_eq!(config.file.filter.as_deref(), Some("debug"));
         assert_eq!(config.file.rotation, Rotation::Hourly);
+        assert_eq!(config.file.max_bytes, Some(52_428_800));
+        assert!(config.file.compress);
         assert_eq!(config.file.retain_days, Some(30));
     }
 

@@ -499,6 +499,8 @@ Serde-deserializable logging configuration. Top-level fields:
 - `format: LogFormat` (default: `Json`)
 - `rotation: Rotation` (default: `Daily`)
 - `filter: Option<String>` — optional per-layer filter override
+- `max_bytes: Option<u64>` — size-based rotation threshold (minimum 4096); cannot combine with time-based rotation
+- `compress: bool` (default: `false`) — gzip rotated files in background thread; requires `max_bytes` or time-based rotation
 - `retain_days: Option<u32>` — delete files older than N days
 - `retain_files: Option<u32>` — keep only N most recent files
 
@@ -540,6 +542,8 @@ Fluent builder for logging configuration. Wraps `LoggingConfig` internally.
 - `format(self, format: LogFormat) -> Self`
 - `filter(self, filter: impl Into<String>) -> Self`
 - `rotation(self, rotation: Rotation) -> Self`
+- `max_bytes(self, bytes: u64) -> Self` — size-based rotation threshold (minimum 4096)
+- `compress(self, compress: bool) -> Self` — gzip rotated files in background thread
 - `retain_days(self, days: u32) -> Self` — clears retain_files
 - `retain_files(self, count: u32) -> Self` — clears retain_days
 
@@ -549,7 +553,8 @@ Errors that can occur when initializing the logging subsystem.
 
 Variants:
 - `InvalidFilter(String)` — malformed EnvFilter directive
-- `InvalidRetention(String)` — invalid retention config (mutual exclusion, zero values, Never + retention)
+- `InvalidRotation(String)` — invalid rotation config (max_bytes too small, combining max_bytes with time rotation, compress without rotation)
+- `InvalidRetention(String)` — invalid retention config (mutual exclusion, zero values, Never without max_bytes + retention)
 - `FileSetupFailed { dir, source }` — could not create log directory
 
 ### Example: From Config File
@@ -566,8 +571,10 @@ format = "pretty"
 enabled = true
 dir = "./logs"
 prefix = "myapp"
-rotation = "daily"
-retain_days = 14
+rotation = "never"
+max_bytes = 10485760  # 10 MB size-based rotation
+compress = true
+retain_files = 5
 ```
 
 ```rust

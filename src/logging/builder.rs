@@ -164,6 +164,18 @@ impl FileBuilder {
         self.config.retain_days = None;
         self
     }
+
+    /// Set size-based rotation threshold in bytes.
+    pub fn max_bytes(mut self, bytes: u64) -> Self {
+        self.config.max_bytes = Some(bytes);
+        self
+    }
+
+    /// Enable or disable gzip compression of rotated log files.
+    pub fn compress(mut self, compress: bool) -> Self {
+        self.config.compress = compress;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -277,6 +289,37 @@ mod tests {
 
         assert!(file.config.retain_days.is_none());
         assert_eq!(file.config.retain_files, Some(10));
+    }
+
+    #[test]
+    fn file_builder_max_bytes() {
+        let file = FileBuilder::new("./logs").max_bytes(10_485_760);
+        assert_eq!(file.config.max_bytes, Some(10_485_760));
+    }
+
+    #[test]
+    fn file_builder_compress() {
+        let file = FileBuilder::new("./logs").compress(true);
+        assert!(file.config.compress);
+    }
+
+    #[test]
+    fn file_builder_size_rotation_full_chain() {
+        let builder = LoggingBuilder::new().file(
+            FileBuilder::new("./logs")
+                .prefix("myapp")
+                .rotation(Rotation::Never)
+                .max_bytes(10_485_760)
+                .compress(true)
+                .retain_files(5),
+        );
+
+        let config = builder.into_config();
+        assert!(config.file.enabled);
+        assert_eq!(config.file.rotation, Rotation::Never);
+        assert_eq!(config.file.max_bytes, Some(10_485_760));
+        assert!(config.file.compress);
+        assert_eq!(config.file.retain_files, Some(5));
     }
 
     #[test]

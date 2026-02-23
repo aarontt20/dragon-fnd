@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::filter::EnvFilter;
@@ -8,6 +8,8 @@ use tracing_subscriber::Layer;
 
 use super::config::{FileConfig, LogFormat, LoggingConfig, Rotation};
 use super::error::LoggingError;
+use super::retain;
+use super::writer::SizeRotatingWriter;
 
 /// Initialize the tracing subscriber based on the provided logging configuration.
 ///
@@ -19,8 +21,35 @@ pub(crate) fn init_logging(config: &LoggingConfig) -> Result<Option<WorkerGuard>
         return Ok(None);
     }
 
-    // Validate retention config (only when file logging is active)
+    // Validate file config (only when file logging is active)
     if config.file.enabled {
+        // Rotation rules (checked first)
+        if config.file.max_bytes.is_some_and(|b| b < 4096) {
+            return Err(LoggingError::InvalidRotation(
+                "max_bytes must be at least 4096".to_string(),
+            ));
+        }
+        if config.file.max_bytes.is_some() && config.file.rotation != Rotation::Never {
+            return Err(LoggingError::InvalidRotation(
+                "combining max_bytes with time-based rotation is not yet supported".to_string(),
+            ));
+        }
+        if config.file.compress && config.file.rotation != Rotation::Never {
+            return Err(LoggingError::InvalidRotation(
+                "compression with time-based rotation is not yet supported".to_string(),
+            ));
+        }
+        if config.file.compress
+            && config.file.max_bytes.is_none()
+            && config.file.rotation == Rotation::Never
+        {
+            return Err(LoggingError::InvalidRotation(
+                "compress requires rotation to be enabled (set max_bytes or a time-based rotation)"
+                    .to_string(),
+            ));
+        }
+
+        // Retention rules
         if config.file.retain_days.is_some() && config.file.retain_files.is_some() {
             return Err(LoggingError::InvalidRetention(
                 "retain_days and retain_files are mutually exclusive".to_string(),
@@ -37,6 +66,7 @@ pub(crate) fn init_logging(config: &LoggingConfig) -> Result<Option<WorkerGuard>
             ));
         }
         if config.file.rotation == Rotation::Never
+            && config.file.max_bytes.is_none()
             && (config.file.retain_days.is_some() || config.file.retain_files.is_some())
         {
             return Err(LoggingError::InvalidRetention(
@@ -151,11 +181,13 @@ fn build_file_layer(
         source: e,
     })?;
 
-    // Run retention cleanup before opening new log file
-    let cleanup_errors = if config.rotation != Rotation::Never
+    // Run startup retention cleanup (only for time-based rotation;
+    // size-based rotation handles retention inline after each rotation)
+    let cleanup_errors = if config.max_bytes.is_none()
+        && config.rotation != Rotation::Never
         && (config.retain_days.is_some() || config.retain_files.is_some())
     {
-        cleanup_old_logs(
+        retain::cleanup_old_logs(
             &config.dir,
             &config.prefix,
             config.retain_days,
@@ -165,14 +197,25 @@ fn build_file_layer(
         Vec::new()
     };
 
-    // Create rolling appender
-    let appender = match config.rotation {
-        Rotation::Daily => tracing_appender::rolling::daily(&config.dir, &config.prefix),
-        Rotation::Hourly => tracing_appender::rolling::hourly(&config.dir, &config.prefix),
-        Rotation::Never => tracing_appender::rolling::never(&config.dir, &config.prefix),
+    // Create writer: size-based or time-based
+    let (non_blocking, guard) = if let Some(max_bytes) = config.max_bytes {
+        let writer = SizeRotatingWriter::new(
+            config.dir.clone(),
+            config.prefix.clone(),
+            max_bytes,
+            config.compress,
+            config.retain_days,
+            config.retain_files,
+        )?;
+        tracing_appender::non_blocking(writer)
+    } else {
+        let appender = match config.rotation {
+            Rotation::Daily => tracing_appender::rolling::daily(&config.dir, &config.prefix),
+            Rotation::Hourly => tracing_appender::rolling::hourly(&config.dir, &config.prefix),
+            Rotation::Never => tracing_appender::rolling::never(&config.dir, &config.prefix),
+        };
+        tracing_appender::non_blocking(appender)
     };
-
-    let (non_blocking, guard) = tracing_appender::non_blocking(appender);
 
     // Build per-layer filter
     let filter = match config.filter.as_deref() {
@@ -194,80 +237,6 @@ fn build_file_layer(
     };
 
     Ok((layer, guard, cleanup_errors))
-}
-
-/// Scan a directory for log files matching the given prefix and delete files
-/// according to the retention policy.
-///
-/// Returns a list of files that could not be deleted (path + error).
-/// The caller is responsible for surfacing these errors.
-fn cleanup_old_logs(
-    dir: &Path,
-    prefix: &str,
-    retain_days: Option<u32>,
-    retain_files: Option<u32>,
-) -> Vec<(PathBuf, std::io::Error)> {
-    let mut errors = Vec::new();
-
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) => {
-            // Nonexistent directory is a no-op (no files to clean).
-            // Other errors (e.g. permission denied) are surfaced to the caller.
-            if e.kind() != std::io::ErrorKind::NotFound {
-                errors.push((dir.to_path_buf(), e));
-            }
-            return errors;
-        }
-    };
-
-    // Collect matching files with their modification times
-    let mut files: Vec<(PathBuf, std::time::SystemTime)> = entries
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let path = entry.path();
-            if !path.is_file() {
-                return None;
-            }
-            let name = path.file_name()?.to_str()?;
-            // Match "{prefix}." to avoid matching unrelated files (e.g. "app" matching "application.log").
-            // Rotated files always have the format "{prefix}.{date}", so the dot is always present.
-            let match_prefix = format!("{prefix}.");
-            if !name.starts_with(&match_prefix) {
-                return None;
-            }
-            let mtime = entry.metadata().ok()?.modified().ok()?;
-            Some((path, mtime))
-        })
-        .collect();
-
-    // Sort by modification time, newest first
-    files.sort_by(|a, b| b.1.cmp(&a.1));
-
-    if let Some(days) = retain_days {
-        let cutoff = std::time::SystemTime::now()
-            - std::time::Duration::from_secs(u64::from(days) * 24 * 3600);
-        for (path, mtime) in &files {
-            if *mtime < cutoff {
-                if let Err(e) = fs::remove_file(path) {
-                    errors.push((path.clone(), e));
-                }
-            }
-        }
-    }
-
-    if let Some(max_files) = retain_files {
-        let max = max_files as usize;
-        if files.len() > max {
-            for (path, _) in &files[max..] {
-                if let Err(e) = fs::remove_file(path) {
-                    errors.push((path.clone(), e));
-                }
-            }
-        }
-    }
-
-    errors
 }
 
 #[cfg(test)]
@@ -363,6 +332,8 @@ mod tests {
             format: LogFormat::Json,
             filter: None,
             rotation: Rotation::Daily,
+            max_bytes: None,
+            compress: false,
             retain_days: None,
             retain_files: None,
         };
@@ -373,89 +344,107 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_old_logs_days_retention() {
-        let dir = tempfile::tempdir().unwrap();
-
-        // Create files with different modification times
-        let old_file = dir.path().join("app.2024-01-01.log");
-        let new_file = dir.path().join("app.2024-12-01.log");
-        fs::write(&old_file, "old").unwrap();
-        fs::write(&new_file, "new").unwrap();
-
-        // Set the old file's mtime to 30 days ago
-        let old_time = std::time::SystemTime::now()
-            - std::time::Duration::from_secs(30 * 24 * 3600);
-        let times = fs::FileTimes::new().set_modified(old_time);
-        fs::File::open(&old_file).unwrap().set_times(times).unwrap();
-
-        let errors = cleanup_old_logs(dir.path(), "app", Some(7), None);
-        assert!(errors.is_empty());
-        assert!(!old_file.exists(), "old file should be deleted");
-        assert!(new_file.exists(), "new file should be kept");
+    fn rotation_validation_max_bytes_too_small() {
+        let mut config = LoggingConfig::default();
+        config.file.enabled = true;
+        config.file.rotation = Rotation::Never;
+        config.file.max_bytes = Some(100);
+        let result = init_logging(&config);
+        assert!(matches!(result, Err(LoggingError::InvalidRotation(_))));
     }
 
     #[test]
-    fn cleanup_old_logs_files_retention() {
-        let dir = tempfile::tempdir().unwrap();
-
-        // Create 5 files with staggered mtimes
-        let mut files = Vec::new();
-        for i in 0..5 {
-            let path = dir.path().join(format!("app.{i}.log"));
-            fs::write(&path, format!("log {i}")).unwrap();
-            let mtime = std::time::SystemTime::now()
-                - std::time::Duration::from_secs((5 - i) * 3600);
-            let times = fs::FileTimes::new().set_modified(mtime);
-            fs::File::open(&path).unwrap().set_times(times).unwrap();
-            files.push(path);
-        }
-
-        // Keep only 3 most recent
-        let errors = cleanup_old_logs(dir.path(), "app", None, Some(3));
-        assert!(errors.is_empty());
-
-        // Files 3, 4 (newest) should exist; 0, 1 (oldest) should be deleted
-        assert!(!files[0].exists(), "oldest file should be deleted");
-        assert!(!files[1].exists(), "second oldest should be deleted");
-        assert!(files[2].exists(), "third newest should be kept");
-        assert!(files[3].exists(), "second newest should be kept");
-        assert!(files[4].exists(), "newest should be kept");
+    fn rotation_validation_max_bytes_with_daily() {
+        let mut config = LoggingConfig::default();
+        config.file.enabled = true;
+        config.file.max_bytes = Some(10_485_760);
+        config.file.rotation = Rotation::Daily;
+        let result = init_logging(&config);
+        assert!(matches!(result, Err(LoggingError::InvalidRotation(_))));
     }
 
     #[test]
-    fn cleanup_old_logs_nonexistent_dir() {
-        let errors = cleanup_old_logs(Path::new("/nonexistent/dir"), "app", Some(7), None);
-        assert!(errors.is_empty());
+    fn rotation_validation_compress_with_hourly() {
+        let mut config = LoggingConfig::default();
+        config.file.enabled = true;
+        config.file.compress = true;
+        config.file.rotation = Rotation::Hourly;
+        let result = init_logging(&config);
+        assert!(matches!(result, Err(LoggingError::InvalidRotation(_))));
     }
 
     #[test]
-    fn cleanup_old_logs_non_matching_prefix_ignored() {
+    fn rotation_validation_compress_without_rotation() {
+        let mut config = LoggingConfig::default();
+        config.file.enabled = true;
+        config.file.compress = true;
+        config.file.rotation = Rotation::Never;
+        // No max_bytes — compress has nothing to compress
+        let result = init_logging(&config);
+        assert!(matches!(result, Err(LoggingError::InvalidRotation(_))));
+    }
+
+    #[test]
+    fn rotation_validation_never_with_max_bytes_and_retain_files_allowed() {
         let dir = tempfile::tempdir().unwrap();
+        let mut config = LoggingConfig::default();
+        config.file.enabled = true;
+        config.file.dir = dir.path().to_path_buf();
+        config.file.rotation = Rotation::Never;
+        config.file.max_bytes = Some(10_485_760);
+        config.file.retain_files = Some(5);
+        let result = init_logging(&config);
+        // Should succeed (not error) — max_bytes provides rotation
+        assert!(result.is_ok());
+    }
 
-        let matching = dir.path().join("app.old.log");
-        let non_matching = dir.path().join("other.old.log");
-        fs::write(&matching, "match").unwrap();
-        fs::write(&non_matching, "no match").unwrap();
+    #[test]
+    fn rotation_validation_never_with_max_bytes_and_retain_days_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = LoggingConfig::default();
+        config.file.enabled = true;
+        config.file.dir = dir.path().to_path_buf();
+        config.file.rotation = Rotation::Never;
+        config.file.max_bytes = Some(10_485_760);
+        config.file.retain_days = Some(7);
+        let result = init_logging(&config);
+        // Should succeed — max_bytes provides rotation, retain_days works
+        assert!(result.is_ok());
+    }
 
-        // Set both to old times
-        let old_time = std::time::SystemTime::now()
-            - std::time::Duration::from_secs(30 * 24 * 3600);
-        let times = fs::FileTimes::new().set_modified(old_time);
-        fs::File::open(&matching)
-            .unwrap()
-            .set_times(times)
-            .unwrap();
-        fs::File::open(&non_matching)
-            .unwrap()
-            .set_times(times)
-            .unwrap();
+    #[test]
+    fn rotation_validation_compress_with_max_bytes_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = LoggingConfig::default();
+        config.file.enabled = true;
+        config.file.dir = dir.path().to_path_buf();
+        config.file.rotation = Rotation::Never;
+        config.file.max_bytes = Some(10_485_760);
+        config.file.compress = true;
+        let result = init_logging(&config);
+        // Should succeed — compress + max_bytes is the valid compression path
+        assert!(result.is_ok());
+    }
 
-        let errors = cleanup_old_logs(dir.path(), "app", Some(7), None);
-        assert!(errors.is_empty());
-        assert!(!matching.exists(), "matching old file should be deleted");
-        assert!(
-            non_matching.exists(),
-            "non-matching file should be untouched"
-        );
+    #[test]
+    fn rotation_validation_max_bytes_boundary_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = LoggingConfig::default();
+        config.file.enabled = true;
+        config.file.dir = dir.path().to_path_buf();
+        config.file.rotation = Rotation::Never;
+        config.file.max_bytes = Some(4096);
+        let result = init_logging(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn rotation_validation_max_bytes_boundary_fail() {
+        let mut config = LoggingConfig::default();
+        config.file.enabled = true;
+        config.file.rotation = Rotation::Never;
+        config.file.max_bytes = Some(4095);
+        let result = init_logging(&config);
+        assert!(matches!(result, Err(LoggingError::InvalidRotation(_))));
     }
 }

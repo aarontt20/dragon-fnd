@@ -8,7 +8,7 @@ This document captures what dragon-fnd will become — the subsystems on the hor
 
 The config subsystem is complete: `ConfigSource` trait for extensible input channels, `FileSource` (TOML files), `EnvSource` (environment variables with prefix/separator), a `ConfigBuilder` with fluent API and generic `build::<T>()`, and graph-based `${path.to.field}` variable resolution with topological sort, cycle detection, and full value substitution. `AppContext<C>` uses a type-state builder with compile-time enforcement — `build_sync()` returns `Result` and is only available when config is provided.
 
-The logging subsystem is complete: structured logging via `tracing` with console and file outputs, per-layer `EnvFilter` configuration, time-based file rotation (daily/hourly/never) via `tracing-appender`, retention cleanup (days-based or file-count), fluent builder API (`LoggingBuilder`, `ConsoleBuilder`, `FileBuilder`), and full `AppContext` integration. Logging is the first feature-gated subsystem (`logging` feature). See DESIGN.md for full details. What follows is everything that's still ahead.
+The logging subsystem is complete: structured logging via `tracing` with console and file outputs, per-layer `EnvFilter` configuration, time-based file rotation (daily/hourly/never) via `tracing-appender`, size-based file rotation with background gzip compression via a custom `SizeRotatingWriter`, retention cleanup (days-based or file-count), fluent builder API (`LoggingBuilder`, `ConsoleBuilder`, `FileBuilder`), and full `AppContext` integration. Logging is the first feature-gated subsystem (`logging` feature). See DESIGN.md for full details. What follows is everything that's still ahead.
 
 ---
 
@@ -127,7 +127,7 @@ ctx.config();     // &MyConfig — always available
 ctx.database();   // &Pool — only available because with_database() was called
 ```
 
-Note: `with_logging()` is available on all builder states (before or after `with_config()`). Logging initialization happens inside `build_sync()` / `build()`, not at registration time. Size-based rotation is not currently supported — `tracing-appender` provides time-based only. This could be added later via a custom appender.
+Note: `with_logging()` is available on all builder states (before or after `with_config()`). Logging initialization happens inside `build_sync()` / `build()`, not at registration time.
 
 ---
 
@@ -159,7 +159,7 @@ The key insight: CLI args are not special. They are just another config source w
 
 **Feature:** `logging` — See [DESIGN.md](DESIGN.md) for full details.
 
-Future extensions: size-based rotation (requires custom appender beyond `tracing-appender`), additional output sinks (network, syslog).
+Future extensions: additional output sinks (network, syslog).
 
 ---
 

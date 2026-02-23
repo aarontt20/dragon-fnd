@@ -10,6 +10,9 @@ pub enum LoggingError {
     #[error("invalid retention config: {0}")]
     InvalidRetention(String),
 
+    #[error("invalid rotation config: {0}")]
+    InvalidRotation(String),
+
     #[error("failed to create log directory '{}'", dir.display())]
     FileSetupFailed {
         dir: PathBuf,

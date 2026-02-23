@@ -115,3 +115,66 @@ fn invalid_retention_config_errors() {
 
     assert!(result.is_err());
 }
+
+#[test]
+fn build_sync_with_size_rotation_creates_dir_and_active_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_dir = dir.path().join("logs");
+
+    let result = AppContext::builder()
+        .with_logging(
+            LoggingBuilder::new().filter("info").file(
+                FileBuilder::new(&log_dir)
+                    .prefix("app")
+                    .rotation(Rotation::Never)
+                    .max_bytes(10_485_760),
+            ),
+        )
+        .with_config("test".to_string())
+        .build_sync();
+
+    assert!(result.is_ok());
+    assert!(log_dir.exists(), "log directory should be created");
+    assert!(log_dir.join("app").exists(), "active log file should exist");
+}
+
+#[test]
+fn build_sync_with_size_rotation_and_compress_and_retain() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_dir = dir.path().join("logs");
+
+    let result = AppContext::builder()
+        .with_logging(
+            LoggingBuilder::new().filter("info").file(
+                FileBuilder::new(&log_dir)
+                    .prefix("app")
+                    .rotation(Rotation::Never)
+                    .max_bytes(10_485_760)
+                    .compress(true)
+                    .retain_files(5),
+            ),
+        )
+        .with_config("test".to_string())
+        .build_sync();
+
+    assert!(result.is_ok());
+}
+
+#[test]
+fn invalid_max_bytes_with_time_rotation_errors_through_app_context() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let result = AppContext::builder()
+        .with_logging(
+            LoggingBuilder::new().filter("info").file(
+                FileBuilder::new(dir.path())
+                    .prefix("app")
+                    .rotation(Rotation::Daily)
+                    .max_bytes(10_485_760),
+            ),
+        )
+        .with_config("test".to_string())
+        .build_sync();
+
+    assert!(result.is_err());
+}

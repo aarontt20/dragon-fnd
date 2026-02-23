@@ -28,13 +28,15 @@ src/
 │   ├── mod.rs             # Re-exports, pub(crate) init_logging
 │   ├── config.rs          # LoggingConfig, ConsoleConfig, FileConfig, LogFormat, Rotation (serde)
 │   ├── builder.rs         # LoggingBuilder, ConsoleBuilder, FileBuilder (fluent API)
-│   ├── error.rs           # LoggingError enum (3 variants)
-│   └── init.rs            # Subscriber initialization, layer composition, retention cleanup
+│   ├── error.rs           # LoggingError enum (4 variants)
+│   ├── init.rs            # Subscriber initialization, layer composition, validation
+│   ├── retain.rs          # Retention cleanup: delete old rotated log files
+│   └── writer.rs          # SizeRotatingWriter: size-based rotation with compression
 └── context/
     └── mod.rs             # AppContext<C> with type-state AppContextBuilder
 ```
 
-14 source files. Tests are inline (`#[cfg(test)]` modules) plus integration tests in `tests/`.
+16 source files. Tests are inline (`#[cfg(test)]` modules) plus integration tests in `tests/`.
 
 ---
 
@@ -157,7 +159,7 @@ Serde-deserializable types for TOML configuration:
 
 - `LoggingConfig` — top-level: `enabled`, `filter` (EnvFilter directive), `modules` (per-module overrides), nested `console` and `file`
 - `ConsoleConfig` — `enabled`, `format`, optional `filter` override
-- `FileConfig` — `enabled`, `dir`, `prefix`, `format`, `rotation`, optional `filter` override, optional `retain_days` or `retain_files` (mutually exclusive)
+- `FileConfig` — `enabled`, `dir`, `prefix`, `format`, `rotation`, optional `filter` override, optional `max_bytes` (size-based rotation threshold), `compress` (gzip rotated files), optional `retain_days` or `retain_files` (mutually exclusive)
 - `LogFormat` — `Pretty` | `Json` | `Compact`
 - `Rotation` — `Daily` | `Hourly` | `Never`
 
@@ -167,7 +169,7 @@ Fluent API wrapping the config types — no field duplication:
 
 - `LoggingBuilder` wraps `LoggingConfig`. Constructed via `new()` (defaults) or `from_config()` (bridging from deserialized config). Methods: `filter()`, `module()`, `enabled()`, `console()`, `file()`. `into_config()` is `pub(crate)` — consumed by `build_sync()`.
 - `ConsoleBuilder` wraps `ConsoleConfig`. Methods: `format()`, `filter()`, `enabled()`.
-- `FileBuilder` wraps `FileConfig`. Constructed via `new(dir)` which auto-enables file output. Methods: `prefix()`, `format()`, `filter()`, `rotation()`, `retain_days()`, `retain_files()`. The two retention methods are mutually exclusive — each clears the other.
+- `FileBuilder` wraps `FileConfig`. Constructed via `new(dir)` which auto-enables file output. Methods: `prefix()`, `format()`, `filter()`, `rotation()`, `max_bytes()`, `compress()`, `retain_days()`, `retain_files()`. The two retention methods are mutually exclusive — each clears the other.
 
 ### Subscriber Initialization (`src/logging/init.rs`)
 
@@ -179,18 +181,39 @@ Each layer gets its own `EnvFilter`: the base filter (from `config.filter` + `co
 
 `try_init()` errors are all treated as "subscriber already set" and return `Ok(None)` — no string matching. If retention cleanup errors occurred before the subscriber was set, they are surfaced to stderr via `eprintln!` as a fallback.
 
-### Retention Cleanup
+Validation runs when file logging is enabled, checking rotation rules before retention rules:
+1. `max_bytes` must be at least 4096
+2. `max_bytes` cannot combine with time-based rotation (`Daily`/`Hourly`)
+3. `compress` cannot combine with time-based rotation
+4. `compress` requires some form of rotation (`max_bytes` or time-based)
+5. Existing retention validation (mutual exclusion, zero values, `Never` without `max_bytes` + retention)
 
-`cleanup_old_logs()` runs before opening a new log file. It scans the log directory for files matching the prefix, sorts by modification time, and deletes according to the retention policy (days-based or file-count). Deletion errors are collected as `Vec<(PathBuf, io::Error)>` and logged via `tracing::warn!` after the subscriber is live — surfacing errors without blocking initialization.
+### Retention Cleanup (`src/logging/retain.rs`)
+
+`cleanup_old_logs()` scans a directory for rotated log files matching the prefix (both plain and `.gz` compressed), sorts by modification time, and deletes according to the retention policy (days-based or file-count-based). Deletion errors are collected as `Vec<(PathBuf, io::Error)>` — the caller decides how to surface them.
+
+For time-based rotation, cleanup runs at startup before the subscriber is live. For size-based rotation, cleanup runs inline after each rotation inside `SizeRotatingWriter`.
+
+### Size-Based Rotation (`src/logging/writer.rs`)
+
+`SizeRotatingWriter` implements `std::io::Write` for size-based log file rotation. It writes to `{dir}/{prefix}` and when the file exceeds `max_bytes`, renames the active file with a UTC timestamp suffix (`{prefix}.YYYYMMDDTHHmmss.SSS`), opens a new active file, optionally spawns a background thread to compress the rotated file with gzip, and runs retention cleanup.
+
+Key design decisions:
+- **No internal locking.** `tracing_appender::non_blocking` serializes all writes through a single worker thread, so the writer is single-threaded.
+- **All rotation errors are soft.** The writer IS the tracing writer — `tracing::warn!` would recurse. Errors use `eprintln!` with `dragon-fnd:` prefix. `non_blocking` silently swallows `io::Error` from `write()`, so hard errors would just be lost.
+- **Background compression.** `compress_file()` runs in a detached `std::thread::spawn`. No shared state — the thread owns the path. Uses streaming `io::copy` from `BufReader` to `GzEncoder` to avoid loading entire files into memory.
+- **Cascading rotation prevention.** `bytes_written` is reset to 0 at the start of `rotate()` before any I/O, so if rotation fails partway through, subsequent writes don't re-trigger rotation on every call.
+- **Timestamp collision handling.** If the timestamp already exists (rapid rotation within 1ms), appends `.1`, `.2`, etc. TOCTOU race is acceptable because `non_blocking` enforces single-writer.
 
 ### Error Types (`src/logging/error.rs`)
 
-`LoggingError` — 3 variants, `#[non_exhaustive]`:
+`LoggingError` — 4 variants, `#[non_exhaustive]`:
 
 | Variant | Meaning |
 |---------|---------|
 | `InvalidFilter(String)` | Malformed EnvFilter directive |
-| `InvalidRetention(String)` | Invalid retention config (mutual exclusion, zero values, Never + retention) |
+| `InvalidRotation(String)` | Invalid rotation config (max_bytes too small, combining max_bytes with time rotation, compress without rotation) |
+| `InvalidRetention(String)` | Invalid retention config (mutual exclusion, zero values, Never without max_bytes + retention) |
 | `FileSetupFailed { dir, source }` | Could not create log directory (display shows path only; `source` available via `std::error::Error::source()`) |
 
 ---
@@ -295,6 +318,8 @@ Three always-on crates, plus optional crates behind feature flags:
 | `tracing` | 0.1 | Logging instrumentation API | `logging` |
 | `tracing-subscriber` | 0.3 (env-filter, json, fmt) | Subscriber layers and filtering | `logging` |
 | `tracing-appender` | 0.2 | Non-blocking file appender with rotation | `logging` |
+| `flate2` | 1 | Gzip compression for rotated log files | `logging` |
+| `time` | 0.3 (formatting, macros, std) | UTC timestamps for rotated filenames | `logging` |
 
 Dev dependencies: `tempfile` (filesystem tests), `serial_test` (env-var test serialization).
 

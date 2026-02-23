@@ -7,14 +7,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `docs/DESIGN.md` — How the built system works (architecture, current state)
 - `docs/VISION.md` — Where the project is going (planned subsystems, design philosophy)
 - `DOC.md` — API documentation
-- `TEST.md` — Test coverage documentation (89 unit + 16 integration + 2 doc-tests with logging feature)
+- `TEST.md` — Test coverage documentation (113 unit + 11 integration + 2 doc-tests with logging feature)
 
 ## Build Commands
 
 ```bash
 cargo build              # Build the library
 cargo test               # Run all tests (58 unit + 8 integration + 2 doc-tests)
-cargo test --features logging  # Run all tests including logging (89 unit + 16 integration + 2 doc-tests)
+cargo test --features logging  # Run all tests including logging (113 unit + 11 integration + 2 doc-tests)
 cargo test resolve       # Run tests matching "resolve"
 cargo clippy             # Run linter
 cargo doc --open         # Generate and view documentation
@@ -43,7 +43,9 @@ src/
 │   ├── config.rs       # LoggingConfig, ConsoleConfig, FileConfig (serde types)
 │   ├── builder.rs      # LoggingBuilder, ConsoleBuilder, FileBuilder (fluent API)
 │   ├── error.rs        # LoggingError enum
-│   └── init.rs         # Subscriber initialization, retention cleanup
+│   ├── init.rs         # Subscriber initialization, validation
+│   ├── retain.rs       # Retention cleanup for rotated log files
+│   └── writer.rs       # SizeRotatingWriter with compression
 └── context/
     └── mod.rs          # AppContext with type-state AppContextBuilder
 ```

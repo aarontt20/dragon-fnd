@@ -3,7 +3,7 @@
 Tests are inline (`#[cfg(test)]` modules in source files) plus integration tests in `tests/`.
 
 **Without logging feature: 58 unit tests + 8 integration tests + 2 doc-tests = 68 tests**
-**With logging feature: 89 unit tests + 16 integration tests + 2 doc-tests = 107 tests**
+**With logging feature: 113 unit tests + 11 integration tests + 2 doc-tests = 126 tests**
 
 ---
 
@@ -173,7 +173,7 @@ Graph-based resolution handles dependencies correctly.
 
 ---
 
-## Module: `logging::config` (8 tests, feature: `logging`)
+## Module: `logging::config` (10 tests, feature: `logging`)
 
 Tests for serde deserialization of logging config types.
 
@@ -187,10 +187,12 @@ Tests for serde deserialization of logging config types.
 | `retain_files_only` | Retention | `retain_files` without `retain_days` parses |
 | `console_filter_override_parses` | Per-layer filter | Console filter override parses correctly |
 | `file_filter_override_parses` | Per-layer filter | File filter override parses correctly |
+| `max_bytes_parses` | Size rotation | `max_bytes` field deserializes as `Option<u64>` |
+| `compress_parses` | Compression | `compress` field deserializes as `bool` |
 
 ---
 
-## Module: `logging::builder` (9 tests, feature: `logging`)
+## Module: `logging::builder` (12 tests, feature: `logging`)
 
 Tests for fluent builder API.
 
@@ -202,15 +204,18 @@ Tests for fluent builder API.
 | `console_builder_overrides` | Console builder | `format()`, `filter()`, `enabled()` on ConsoleBuilder |
 | `file_builder_enables_by_default` | Auto-enable | `FileBuilder::new(dir)` sets `enabled = true` |
 | `file_builder_overrides` | File builder | All FileBuilder methods set correct fields |
+| `file_builder_max_bytes` | Size rotation | `max_bytes()` sets the field correctly |
+| `file_builder_compress` | Compression | `compress()` sets the field correctly |
+| `file_builder_size_rotation_full_chain` | Full chain | `max_bytes + compress + retain_files` compose correctly |
 | `retain_days_clears_retain_files` | Mutual exclusion | `retain_days()` after `retain_files()` clears files |
 | `retain_files_clears_retain_days` | Mutual exclusion | `retain_files()` after `retain_days()` clears days |
 | `console_and_file_compose_into_logging_builder` | Composition | Full builder chain with console + file produces correct config |
 
 ---
 
-## Module: `logging::init` (14 tests, feature: `logging`)
+## Module: `logging::init` (19 tests, feature: `logging`)
 
-Tests for subscriber initialization and retention cleanup.
+Tests for subscriber initialization, validation rules, and layer composition.
 
 | Test | Coverage | Behavior Verified |
 |------|----------|-------------------|
@@ -222,8 +227,26 @@ Tests for subscriber initialization and retention cleanup.
 | `retention_validation_both_set` | Validation | Both `retain_days` and `retain_files` returns `InvalidRetention` |
 | `retention_validation_zero_days` | Validation | `retain_days = 0` returns `InvalidRetention` |
 | `retention_validation_zero_files` | Validation | `retain_files = 0` returns `InvalidRetention` |
-| `retention_validation_never_rotation_with_retention` | Validation | `Rotation::Never` + retention returns `InvalidRetention` |
+| `retention_validation_never_rotation_with_retention` | Validation | `Rotation::Never` without `max_bytes` + retention returns `InvalidRetention` |
+| `rotation_validation_max_bytes_too_small` | Validation | `max_bytes < 4096` returns `InvalidRotation` |
+| `rotation_validation_max_bytes_with_daily` | Validation | `max_bytes` + time-based rotation returns `InvalidRotation` |
+| `rotation_validation_compress_with_hourly` | Validation | `compress` + time-based rotation returns `InvalidRotation` |
+| `rotation_validation_compress_without_rotation` | Validation | `compress` without any rotation returns `InvalidRotation` |
+| `rotation_validation_never_with_max_bytes_and_retain_files_allowed` | Validation | `max_bytes` + `retain_files` is valid (max_bytes provides rotation) |
+| `rotation_validation_never_with_max_bytes_and_retain_days_allowed` | Validation | `max_bytes` + `retain_days` is valid |
+| `rotation_validation_compress_with_max_bytes_allowed` | Validation | `compress` + `max_bytes` is valid |
+| `rotation_validation_max_bytes_boundary_pass` | Boundary | `max_bytes = 4096` (exact minimum) succeeds |
+| `rotation_validation_max_bytes_boundary_fail` | Boundary | `max_bytes = 4095` (below minimum) returns `InvalidRotation` |
 | `build_file_layer_creates_directory` | Dir creation | Nested log directory created automatically |
+
+---
+
+## Module: `logging::retain` (4 tests, feature: `logging`)
+
+Tests for retention cleanup of rotated log files.
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
 | `cleanup_old_logs_days_retention` | Days retention | Files older than N days are deleted |
 | `cleanup_old_logs_files_retention` | File count | Only N newest files kept, oldest deleted |
 | `cleanup_old_logs_nonexistent_dir` | Missing dir | Nonexistent directory returns empty errors |
@@ -231,7 +254,26 @@ Tests for subscriber initialization and retention cleanup.
 
 ---
 
-## Integration Tests: `logging_init` (8 tests, feature: `logging`)
+## Module: `logging::writer` (10 tests, feature: `logging`)
+
+Tests for `SizeRotatingWriter` — size-based log file rotation with compression.
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `new_creates_active_file` | Creation | Active file created, byte counter starts at 0 |
+| `new_recovers_byte_count_from_existing_file` | Recovery | Existing file's size used as initial byte counter |
+| `write_increments_counter` | Tracking | Each write increments `bytes_written` by actual bytes written |
+| `rotation_triggered_at_threshold` | Rotation | Rotation triggered when `bytes_written >= max_bytes`; active file refreshed, rotated file contains original data |
+| `multiple_rapid_rotations_produce_unique_filenames` | Collision | 5 rapid rotations produce 5 unique rotated files + 1 active |
+| `timestamp_format_is_correct_shape` | Format | Rotated filename has `YYYYMMDDTHHmmss.SSS` format (19 chars) |
+| `rotation_with_compression_produces_gz` | Compression | Rotated file compressed to `.gz`, original deleted |
+| `compress_file_produces_valid_gzip` | Gzip | Compressed file decompresses to original content |
+| `retention_runs_inline_after_rotation` | Retention | Retention cleanup runs after each rotation, keeping only N files |
+| `compressed_gz_files_counted_by_retention` | Gz retention | `.gz` files are matched by prefix and counted in retention |
+
+---
+
+## Integration Tests: `logging_init` (11 tests, feature: `logging`)
 
 End-to-end tests for logging integration with AppContext (`tests/logging_init.rs`).
 
@@ -245,6 +287,9 @@ End-to-end tests for logging integration with AppContext (`tests/logging_init.rs
 | `with_logging_after_config` | Builder ordering | `with_logging()` after `with_config()` works |
 | `invalid_retention_skipped_when_file_disabled` | Validation gating | Conflicting retention values don't error when file logging is disabled |
 | `invalid_retention_config_errors` | Error propagation | Retention validation errors surface through `build_sync()` |
+| `build_sync_with_size_rotation_creates_dir_and_active_file` | Size rotation | Size-based rotation creates directory and active log file |
+| `build_sync_with_size_rotation_and_compress_and_retain` | Full chain | Size rotation + compress + retain_files compose through AppContext |
+| `invalid_max_bytes_with_time_rotation_errors_through_app_context` | Error propagation | Combining max_bytes with Daily rotation errors through `build_sync()` |
 
 ---
 
@@ -293,8 +338,9 @@ Tests for the type-state `AppContext` builder (`tests/context.rs`).
 - `AppContext` - type-state builder, fallible `build_sync()`, compile-time enforcement
 - `LoggingConfig` - defaults, round-trip, all format/rotation variants, retention fields, per-layer filters
 - `LoggingBuilder` / `ConsoleBuilder` / `FileBuilder` - defaults, overrides, composition, mutual exclusion
-- `init_logging()` - filter building, disabled path, retention validation, directory creation
+- `init_logging()` - filter building, disabled path, retention validation, rotation validation, boundary tests, directory creation
 - `cleanup_old_logs()` - days retention, file count retention, missing dir, prefix filtering
+- `SizeRotatingWriter` - creation, byte recovery, write tracking, rotation threshold, compression, rapid rotations, timestamp format, inline retention, gz retention
 
 ### Partially Covered
 - `FileSource` - happy path and not-found; missing I/O error and parse error cases
