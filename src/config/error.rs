@@ -25,8 +25,8 @@ pub enum ConfigError {
     #[error("root-level config entry must be a table, got {0}")]
     RootNotTable(String),
 
-    #[error("circular reference detected in configuration")]
-    CircularReference,
+    #[error("circular reference detected: {}", .0.join(" -> "))]
+    CircularReference(Vec<String>),
 
     #[error("referenced path not found: {0}")]
     ReferenceNotFound(String),

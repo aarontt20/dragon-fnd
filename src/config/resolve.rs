@@ -114,10 +114,10 @@ fn topological_sort(references: &[(ConfigPath, ConfigPath)]) -> Result<Vec<Confi
 
     let mut result = Vec::new();
     let mut visited = HashSet::new();
-    let mut in_progress = HashSet::new();
+    let mut stack = Vec::new();
 
     for source in deps.keys() {
-        visit(source, &deps, &mut visited, &mut in_progress, &mut result)?;
+        visit(source, &deps, &mut visited, &mut stack, &mut result)?;
     }
 
     Ok(result)
@@ -127,27 +127,32 @@ fn visit<'a>(
     node: &'a ConfigPath,
     deps: &HashMap<&'a ConfigPath, HashSet<&'a ConfigPath>>,
     visited: &mut HashSet<&'a ConfigPath>,
-    in_progress: &mut HashSet<&'a ConfigPath>,
+    stack: &mut Vec<&'a ConfigPath>,
     result: &mut Vec<ConfigPath>,
 ) -> Result<(), ConfigError> {
-    if in_progress.contains(node) {
-        return Err(ConfigError::CircularReference);
+    if let Some(pos) = stack.iter().position(|n| *n == node) {
+        let cycle: Vec<String> = stack[pos..]
+            .iter()
+            .chain(std::iter::once(&node))
+            .map(|p| p.join("."))
+            .collect();
+        return Err(ConfigError::CircularReference(cycle));
     }
     if visited.contains(node) {
         return Ok(());
     }
 
-    in_progress.insert(node);
+    stack.push(node);
 
     if let Some(node_deps) = deps.get(node) {
         for dep in node_deps {
             if deps.contains_key(dep) {
-                visit(dep, deps, visited, in_progress, result)?;
+                visit(dep, deps, visited, stack, result)?;
             }
         }
     }
 
-    in_progress.remove(node);
+    stack.pop();
     visited.insert(node);
     result.push(node.clone());
 
@@ -536,7 +541,14 @@ mod tests {
             b = "${a}"
         "#);
         let err = resolve_references(&mut table).unwrap_err();
-        assert!(matches!(err, ConfigError::CircularReference));
+        match err {
+            ConfigError::CircularReference(cycle) => {
+                assert!(cycle.contains(&"a".to_string()));
+                assert!(cycle.contains(&"b".to_string()));
+                assert_eq!(cycle.first(), cycle.last(), "cycle should close");
+            }
+            other => panic!("expected CircularReference, got {other:?}"),
+        }
     }
 
     #[test]
@@ -545,7 +557,12 @@ mod tests {
             a = "${a}"
         "#);
         let err = resolve_references(&mut table).unwrap_err();
-        assert!(matches!(err, ConfigError::CircularReference));
+        match err {
+            ConfigError::CircularReference(cycle) => {
+                assert_eq!(cycle, vec!["a", "a"]);
+            }
+            other => panic!("expected CircularReference, got {other:?}"),
+        }
     }
 
     #[test]
@@ -556,7 +573,15 @@ mod tests {
             c = "${a}"
         "#);
         let err = resolve_references(&mut table).unwrap_err();
-        assert!(matches!(err, ConfigError::CircularReference));
+        match err {
+            ConfigError::CircularReference(cycle) => {
+                assert!(cycle.contains(&"a".to_string()));
+                assert!(cycle.contains(&"b".to_string()));
+                assert!(cycle.contains(&"c".to_string()));
+                assert_eq!(cycle.first(), cycle.last(), "cycle should close");
+            }
+            other => panic!("expected CircularReference, got {other:?}"),
+        }
     }
 
     #[test]
