@@ -56,7 +56,10 @@ pub(crate) fn init_logging(config: &LoggingConfig) -> Result<Option<WorkerGuard>
 
     // Build console layer
     if config.console.enabled {
-        let filter = resolve_layer_filter(config.console.filter.as_deref(), &base_filter)?;
+        let filter = match config.console.filter.as_deref() {
+            Some(f) => EnvFilter::try_new(f).map_err(|e| LoggingError::InvalidFilter(e.to_string()))?,
+            None => base_filter.clone(),
+        };
         layers.push(build_console_layer(config.console.format, filter));
     }
 
@@ -111,17 +114,6 @@ fn build_env_filter(
         directives.push_str(level);
     }
     EnvFilter::try_new(&directives).map_err(|e| LoggingError::InvalidFilter(e.to_string()))
-}
-
-/// Resolve a per-layer filter: use the override if present, otherwise clone the base filter.
-fn resolve_layer_filter(
-    override_filter: Option<&str>,
-    base_filter: &EnvFilter,
-) -> Result<EnvFilter, LoggingError> {
-    match override_filter {
-        Some(f) => build_env_filter(f, &std::collections::BTreeMap::new()),
-        None => Ok(base_filter.clone()),
-    }
 }
 
 /// Build a console fmt layer with the given format and filter.
@@ -183,7 +175,10 @@ fn build_file_layer(
     let (non_blocking, guard) = tracing_appender::non_blocking(appender);
 
     // Build per-layer filter
-    let filter = resolve_layer_filter(config.filter.as_deref(), base_filter)?;
+    let filter = match config.filter.as_deref() {
+        Some(f) => EnvFilter::try_new(f).map_err(|e| LoggingError::InvalidFilter(e.to_string()))?,
+        None => base_filter.clone(),
+    };
 
     let fmt = tracing_subscriber::fmt::layer()
         .with_writer(non_blocking)
@@ -355,20 +350,6 @@ mod tests {
         config.file.retain_days = Some(7);
         let result = init_logging(&config);
         assert!(matches!(result, Err(LoggingError::InvalidRetention(_))));
-    }
-
-    #[test]
-    fn resolve_layer_filter_uses_override() {
-        let base = build_env_filter("info", &BTreeMap::new()).unwrap();
-        let result = resolve_layer_filter(Some("warn"), &base);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn resolve_layer_filter_falls_back_to_base() {
-        let base = build_env_filter("debug", &BTreeMap::new()).unwrap();
-        let result = resolve_layer_filter(None, &base);
-        assert!(result.is_ok());
     }
 
     #[test]

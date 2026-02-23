@@ -173,14 +173,7 @@ mod tests {
 
     #[test]
     fn new_matches_config_defaults() {
-        let builder = LoggingBuilder::new();
-        let default_config = LoggingConfig::default();
-        assert_eq!(builder.config.enabled, default_config.enabled);
-        assert_eq!(builder.config.filter, default_config.filter);
-        assert_eq!(builder.config.modules, default_config.modules);
-        assert_eq!(builder.config.console.enabled, default_config.console.enabled);
-        assert_eq!(builder.config.console.format, default_config.console.format);
-        assert_eq!(builder.config.file.enabled, default_config.file.enabled);
+        assert_eq!(LoggingBuilder::new().into_config(), LoggingConfig::default());
     }
 
     #[test]

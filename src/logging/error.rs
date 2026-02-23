@@ -10,7 +10,7 @@ pub enum LoggingError {
     #[error("invalid retention config: {0}")]
     InvalidRetention(String),
 
-    #[error("failed to create log directory '{}': {source}", dir.display())]
+    #[error("failed to create log directory '{}'", dir.display())]
     FileSetupFailed {
         dir: PathBuf,
         source: std::io::Error,

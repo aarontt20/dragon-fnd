@@ -7,7 +7,7 @@ use serde::Deserialize;
 ///
 /// All fields have serde defaults. An empty `[logging]` table produces a
 /// working configuration (console enabled at info level, file disabled).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct LoggingConfig {
     /// Master switch. When false, no subscriber is initialized.
@@ -35,7 +35,7 @@ impl Default for LoggingConfig {
 }
 
 /// Console output configuration.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct ConsoleConfig {
     pub enabled: bool,
@@ -56,7 +56,7 @@ impl Default for ConsoleConfig {
 }
 
 /// File output configuration.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct FileConfig {
     pub enabled: bool,
