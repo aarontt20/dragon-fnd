@@ -9,7 +9,10 @@ type ConfigPath = Vec<String>;
 pub fn resolve_references(table: &mut Table) -> Result<(), ConfigError> {
     // Phase 1: Collect all references as (source_path, target_path) pairs,
     // and separately track paths with $$ escapes but no ${...} references
-    let (references, escape_only) = collect_references(table)?;
+    let mut references = Vec::new();
+    let mut escape_only = Vec::new();
+    let mut path = Vec::new();
+    collect_from_table(table, &mut path, &mut references, &mut escape_only)?;
 
     if !references.is_empty() {
         // Phase 2: Build dependency graph and topologically sort
@@ -27,16 +30,6 @@ pub fn resolve_references(table: &mut Table) -> Result<(), ConfigError> {
     }
 
     Ok(())
-}
-
-/// Collect all references from the config tree
-#[allow(clippy::type_complexity)] // Inlined into resolve_references in a later commit
-fn collect_references(table: &Table) -> Result<(Vec<(ConfigPath, ConfigPath)>, Vec<ConfigPath>), ConfigError> {
-    let mut refs = Vec::new();
-    let mut escape_only = Vec::new();
-    let mut path = Vec::new();
-    collect_from_table(table, &mut path, &mut refs, &mut escape_only)?;
-    Ok((refs, escape_only))
 }
 
 fn collect_from_table(
@@ -500,7 +493,7 @@ mod tests {
         assert_eq!(arr[0].as_integer(), Some(3000));
     }
 
-    // --- Escape Sequences (3 tests) ---
+    // --- Escape Sequences (4 tests) ---
 
     #[test]
     fn escaped_dollar_sign_with_reference() {

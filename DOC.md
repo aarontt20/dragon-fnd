@@ -85,13 +85,14 @@ impl ConfigSource for MySource {
 ### `merge_at_path`
 
 ```rust
-fn merge_at_path(table: &mut Table, path: &[String], value: Value)
+fn merge_at_path(table: &mut Table, path: &[String], value: Value) -> Result<(), ConfigError>
 ```
 
 Merges a value at the given path into the table.
 
 This is the unified merge function that handles all merge scenarios:
 - Empty path with Table value: deep merge at root level
+- Empty path with non-Table value: returns `ConfigError::RootNotTable`
 - Non-empty path: navigate/create intermediate tables, then merge or replace
 
 Deep merging applies to nested tables: keys are merged recursively rather
@@ -154,8 +155,8 @@ amount = 50
 price = "$$${amount} USD"  # → "$50 USD"
 ```
 
-Note: Strings without any `${...}` references are not processed, so `$$` in those
-strings remains as `$$`.
+Note: `$$` is processed in all strings — both those with `${...}` references and those
+with only `$$` escapes.
 
 **Resolution Order** - References are resolved using topological sort, so
 dependencies are always resolved before dependents. This allows chained references:
@@ -333,8 +334,7 @@ Checks if a string looks like an integer (optional minus followed by digits).
 Variable reference resolution for configuration values.
 
 Supports `${section.field}` syntax for cross-referencing values within config.
-Use `$${...}` to escape and produce a literal `${...}` in strings that also
-contain references.
+Use `$$` to produce a literal `$` in any string.
 
 ### Resolution Algorithm
 
@@ -371,7 +371,6 @@ Resolves all `${path.to.field}` references in the configuration table.
 
 ### Key Functions (private)
 
-- `collect_references` - Walks the config tree, extracts all references
 - `topological_sort` - Orders references by dependency, detects cycles
 - `resolve_at_path` - Resolves references at a specific config path
 - `is_pure_reference` - Checks if string is exactly `${path}` (full substitution)
@@ -390,9 +389,10 @@ Errors that can occur when loading or parsing configuration.
 Variants:
 - `FileNotFound(PathBuf)` - Required config file not found
 - `ReadError { path, source }` - Failed to read config file
-- `ParseError { path, source }` - Failed to parse config file
-- `DeserializeError` - Failed to deserialize config
-- `CircularReference` - Circular reference detected in configuration
+- `ParseError { path, source }` - Failed to parse config file (manually constructed with file path context)
+- `DeserializeError(toml::de::Error)` - Failed to deserialize config (no `#[from]`)
+- `RootNotTable(String)` - Root-level config entry must be a table
+- `CircularReference(Vec<String>)` - Circular reference detected, with cycle path
 - `ReferenceNotFound(String)` - Referenced path not found
 - `InvalidReferencePath(String)` - Invalid reference path
 - `NonScalarReference(String)` - Cannot reference non-scalar value
@@ -519,7 +519,7 @@ Fluent builder for logging configuration. Wraps `LoggingConfig` internally.
 **Methods:**
 
 - `new() -> Self` — defaults: console enabled at info, file disabled
-- `from_config(config: &LoggingConfig) -> Self` — bridge from deserialized config
+- `from_config(config: LoggingConfig) -> Self` — bridge from deserialized config (takes ownership)
 - `filter(self, filter: impl Into<String>) -> Self` — base filter directive
 - `module(self, module: impl Into<String>, level: impl Into<String>) -> Self` — per-module override
 - `enabled(self, enabled: bool) -> Self` — master switch
@@ -574,7 +574,7 @@ retain_days = 14
 use dragon_fnd::logging::LoggingBuilder;
 
 let ctx = AppContext::builder()
-    .with_logging(LoggingBuilder::from_config(&config.logging))
+    .with_logging(LoggingBuilder::from_config(config.logging))
     .with_config(config)
     .build_sync()?;
 ```

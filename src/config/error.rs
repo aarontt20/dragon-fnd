@@ -13,6 +13,9 @@ pub enum ConfigError {
         source: std::io::Error,
     },
 
+    /// TOML syntax error in a specific file. Constructed manually with file path
+    /// context, unlike `DeserializeError` which wraps the final build-time
+    /// deserialization (no file path available at that stage).
     #[error("failed to parse config file '{path}': {source}")]
     ParseError {
         path: PathBuf,

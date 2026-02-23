@@ -2,12 +2,12 @@
 
 Tests are inline (`#[cfg(test)]` modules in source files) plus integration tests in `tests/`.
 
-**Without logging feature: 54 unit tests + 8 integration tests + 2 doc-tests = 64 tests**
-**With logging feature: 87 unit tests + 16 integration tests + 2 doc-tests = 105 tests**
+**Without logging feature: 58 unit tests + 8 integration tests + 2 doc-tests = 68 tests**
+**With logging feature: 89 unit tests + 16 integration tests + 2 doc-tests = 107 tests**
 
 ---
 
-## Module: `config::source` (5 tests)
+## Module: `config::source` (6 tests)
 
 Tests for `merge_at_path()` and `ConfigEntry` constructors.
 
@@ -16,6 +16,7 @@ Tests for `merge_at_path()` and `ConfigEntry` constructors.
 | Test | Coverage | Behavior Verified |
 |------|----------|-------------------|
 | `merge_at_empty_path_deep_merges` | Deep merge at root | Empty path with table value performs recursive merge; existing keys preserved, new keys added, nested tables merged (not replaced) |
+| `merge_at_empty_path_non_table_returns_error` | Root non-table error | Empty path with non-table value (e.g., integer) returns `ConfigError::RootNotTable` |
 | `merge_at_path_creates_intermediates` | Path navigation | Non-existent intermediate tables are created automatically when merging at deep paths like `["a", "b", "c"]` |
 | `merge_at_path_replaces_leaf` | Scalar replacement | Non-table values at leaf positions are replaced entirely |
 | `merge_at_path_merges_tables_at_leaf` | Table merge at leaf | When both existing and new values are tables at the target path, they are deep-merged |
@@ -45,19 +46,20 @@ Tests for `FileSource` TOML file loading.
 
 ---
 
-## Module: `config::env` (12 tests)
+## Module: `config::env` (13 tests)
 
 Tests for `EnvSource` environment variable loading and `coerce_value()` type coercion.
 
-### `coerce_value` (5 tests)
+### `coerce_value` (6 tests)
 
 | Test | Coverage | Behavior Verified |
 |------|----------|-------------------|
 | `coerce_integer` | Integer parsing | Positive, negative, and zero integers parsed correctly |
 | `coerce_float` | Float parsing | Positive, negative, and zero floats (containing `.`) parsed correctly |
 | `coerce_boolean` | Boolean parsing | `true`/`false` recognized case-insensitively (`TRUE`, `False`, etc.) |
-| `coerce_string` | String fallback | Non-numeric/boolean strings kept as-is; note: `"007"` parses as integer 7 |
+| `coerce_string` | String fallback | Non-numeric/boolean strings kept as-is; `"007"` kept as string (leading zeros rejected) |
 | `coerce_edge_cases` | Edge cases | Empty string → string; lone `-` → string; `"1.2.3"` (invalid float) → string |
+| `coerce_leading_zero_stays_string` | Leading zero rejection | `"007"`, `"01"`, `"-01"` stay as strings; `"0"` still parses as integer 0 |
 
 ### `EnvSource` (7 tests)
 
@@ -78,7 +80,7 @@ Tests for `EnvSource` environment variable loading and `coerce_value()` type coe
 
 ---
 
-## Module: `config::resolve` (33 tests)
+## Module: `config::resolve` (35 tests)
 
 Tests for `${path.to.field}` variable reference resolution, including string interpolation,
 full value substitution, graph-based dependency resolution, and error handling.
@@ -123,13 +125,14 @@ Graph-based resolution handles dependencies correctly.
 | `references_in_array_elements` | String refs in array | Each array element's refs resolved |
 | `pure_reference_in_array` | Type-preserving in array | Array elements can be pure refs |
 
-### Escape Sequences (3 tests)
+### Escape Sequences (4 tests)
 
 | Test | Coverage | Behavior Verified |
 |------|----------|-------------------|
 | `escaped_dollar_sign_with_reference` | Escape with ref | `$$` becomes `$` when string has refs |
 | `mixed_escaped_and_reference` | Combined | `$$${amount}` → `$50` |
-| `string_without_references_unchanged` | Limitation | `$$` without refs stays as `$$` |
+| `escape_without_references_is_processed` | Escape-only | `$$` without refs is processed to `$` |
+| `escape_only_in_array` | Escape in array | `$$` in array elements processed to `$` |
 
 ### Type Coercion in Interpolation (2 tests)
 
@@ -137,6 +140,12 @@ Graph-based resolution handles dependencies correctly.
 |------|----------|-------------------|
 | `integer_to_string_in_interpolation` | Int→string | `"port ${port}"` converts int to string |
 | `boolean_to_string_in_interpolation` | Bool→string | `"debug: ${enabled}"` converts bool to string |
+
+### Internal Functions (1 test)
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `get_value_empty_path_returns_error` | Empty path guard | `get_value` with empty path returns `ReferenceNotFound` instead of panicking |
 
 ### Error Cases (12 tests)
 
@@ -160,7 +169,7 @@ Graph-based resolution handles dependencies correctly.
 - All `ConfigError` variants for resolve are tested
 - Graph-based cycle detection catches all cycle types immediately
 - Full value substitution tested for all TOML types (int, float, bool, array, table)
-- Escape sequences only processed in strings containing actual references (documented limitation)
+- Escape sequences processed in all strings containing `$$` (both with and without references)
 
 ---
 
@@ -199,7 +208,7 @@ Tests for fluent builder API.
 
 ---
 
-## Module: `logging::init` (16 tests, feature: `logging`)
+## Module: `logging::init` (14 tests, feature: `logging`)
 
 Tests for subscriber initialization and retention cleanup.
 
@@ -209,8 +218,6 @@ Tests for subscriber initialization and retention cleanup.
 | `build_env_filter_with_modules` | Module overrides | Per-module directives appended correctly |
 | `build_env_filter_invalid_directive` | Invalid filter | Malformed directive returns `InvalidFilter` |
 | `build_env_filter_invalid_module` | Invalid module | Invalid module level returns error |
-| `resolve_layer_filter_uses_override` | Layer filter | Override filter is used when present |
-| `resolve_layer_filter_falls_back_to_base` | Layer filter | Base filter cloned when no override |
 | `disabled_logging_returns_none` | Master switch | `enabled = false` returns `Ok(None)` |
 | `retention_validation_both_set` | Validation | Both `retain_days` and `retain_files` returns `InvalidRetention` |
 | `retention_validation_zero_days` | Validation | `retain_days = 0` returns `InvalidRetention` |

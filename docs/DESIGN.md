@@ -23,7 +23,7 @@ src/
 │   ├── file.rs            # FileSource: loads TOML files
 │   ├── env.rs             # EnvSource: loads environment variables
 │   ├── resolve.rs         # Graph-based ${path.to.field} variable resolution
-│   └── error.rs           # ConfigError enum (10 variants)
+│   └── error.rs           # ConfigError enum (11 variants)
 ├── logging/               # Feature: "logging"
 │   ├── mod.rs             # Re-exports, pub(crate) init_logging
 │   ├── config.rs          # LoggingConfig, ConsoleConfig, FileConfig, LogFormat, Rotation (serde)
@@ -63,8 +63,8 @@ Two constructors serve different use cases:
 - `ConfigEntry::root(table)` — empty path, for sources that produce a complete table (files)
 - `ConfigEntry::at_path(path, value)` — specific path segments, for sources that produce individual values (env vars)
 
-`merge_at_path()` handles all merge scenarios with a `let-else` pattern for the empty-path case:
-1. **Empty path + table value**: deep merge at root level — nested tables merge recursively, non-table values replace
+`merge_at_path()` returns `Result<(), ConfigError>` and handles all merge scenarios with a `let-else` pattern for the empty-path case:
+1. **Empty path + table value**: deep merge at root level — nested tables merge recursively, non-table values return `ConfigError::RootNotTable`
 2. **Non-empty path, final key**: if both existing and incoming are tables, deep merge; otherwise replace entirely
 3. **Non-empty path, intermediate segments**: navigate to the target, auto-creating missing intermediate tables
 
@@ -95,7 +95,7 @@ Produces one `ConfigEntry::at_path(path, coerced_value)` per matching variable.
 
 Value coercion applies in order:
 1. **Boolean** — case-insensitive `true`/`false`
-2. **Integer** — optional leading `-` followed by ASCII digits only (no scientific notation, no hex)
+2. **Integer** — optional leading `-` followed by ASCII digits only (no scientific notation, no hex, no leading zeros)
 3. **Float** — must contain `.` and parse as `f64`
 4. **String** — fallback for everything else
 
@@ -128,16 +128,16 @@ Deserialization happens once at build time. After `build()`, config access is a 
 
 **Phase 1 — Collection.** Walk the entire merged table. For each string value, parse `${path.to.field}` references. Collect them as `(source_path, target_path)` edge pairs. `$$` is recognized as an escape (skipped during collection). Unclosed `${` produces `ConfigError::UnclosedReference`. References inside array elements are collected with position-indexed paths (e.g., `["arr", "0"]`), so a string at `arr[0]` that contains `${some.ref}` is tracked and resolved correctly. Note: user-written reference paths like `${arr.0}` cannot traverse into arrays — `lookup_value` only navigates tables.
 
-**Phase 2 — Topological sort.** Build a dependency graph from the collected edges. Sort via DFS with an `in_progress` set for cycle detection. If a node is visited while already in-progress, the reference chain is circular → `ConfigError::CircularReference`. The result is a resolution order where dependencies come before dependents.
+**Phase 2 — Topological sort.** Build a dependency graph from the collected edges. Sort via DFS with an `in_progress` stack (Vec) for cycle detection. If a node is visited while already in the stack, the cycle path is reconstructed from the stack position where the node first appeared → `ConfigError::CircularReference(cycle_path)`. The result is a resolution order where dependencies come before dependents.
 
 **Phase 3 — Resolution.** Process each path in topological order. Two modes:
 
 - **Pure reference** — the string is exactly `${path}` (no whitespace, single reference, nothing else). The entire value is replaced with the target value's type — integers, booleans, arrays, and tables pass through intact. This enables type-preserving references. Whitespace around the reference (e.g., `"  ${path}  "`) is treated as string interpolation, not pure substitution.
 - **String interpolation** — the string contains `${path}` embedded among other text. Each reference is replaced with the string representation of the target value. Scalars (string, integer, float, boolean, datetime) convert naturally. Non-scalar targets (arrays, tables) produce `ConfigError::NonScalarReference`.
 
-Escape sequences: `$$` becomes literal `$` during resolution, but only in strings that also contain actual `${...}` references. Strings without references are not processed.
+Escape sequences: `$$` becomes literal `$` during resolution. Strings containing `${...}` references have their `$$` escapes processed during Phase 3. Strings that contain `$$` but no references are tracked separately and processed after graph-based resolution (Phase 4 — escape-only pass).
 
-The `get_value` and `get_value_mut` functions are structurally identical — duplicated because Rust's borrow checker requires separate shared and mutable traversal paths.
+The `get_value` and `get_value_mut` functions are structurally identical — duplicated because Rust's borrow checker requires separate shared and mutable traversal paths. Both use `split_first()` for panic-safe path navigation.
 
 ---
 
@@ -191,7 +191,7 @@ Each layer gets its own `EnvFilter`: the base filter (from `config.filter` + `co
 |---------|---------|
 | `InvalidFilter(String)` | Malformed EnvFilter directive |
 | `InvalidRetention(String)` | Invalid retention config (mutual exclusion, zero values, Never + retention) |
-| `FileSetupFailed { dir, source }` | Could not create log directory |
+| `FileSetupFailed { dir, source }` | Could not create log directory (display shows path only; `source` available via `std::error::Error::source()`) |
 
 ---
 
@@ -199,15 +199,16 @@ Each layer gets its own `EnvFilter`: the base filter (from `config.filter` + `co
 
 ### ConfigError
 
-`src/config/error.rs` — 10 variants, `#[non_exhaustive]`:
+`src/config/error.rs` — 11 variants, `#[non_exhaustive]`:
 
 | Variant | Meaning |
 |---------|---------|
 | `FileNotFound(PathBuf)` | Required config file missing |
 | `ReadError { path, source }` | I/O failure reading a file |
-| `ParseError { path, source }` | Invalid TOML syntax |
-| `DeserializeError(toml::de::Error)` | Final deserialization into target type failed |
-| `CircularReference` | Cycle detected in variable reference graph |
+| `ParseError { path, source }` | Invalid TOML syntax (manually constructed with file path context) |
+| `DeserializeError(toml::de::Error)` | Final deserialization into target type failed (no `#[from]` — explicit `map_err` at call sites) |
+| `RootNotTable(String)` | Root-level `ConfigEntry` has non-table value (e.g., integer at empty path) |
+| `CircularReference(Vec<String>)` | Cycle detected in variable reference graph, with dotted-path chain (e.g., `a.b -> c.d -> a.b`) |
 | `ReferenceNotFound(String)` | `${path}` points to a nonexistent key |
 | `InvalidReferencePath(String)` | Empty or malformed reference path (e.g., `${a..b}`) |
 | `NonScalarReference(String)` | Embedded reference targets a table or array |
@@ -315,4 +316,4 @@ No async runtime. No CLI parser.
 ## Known Limitations
 
 - **Resolution operates on TOML intermediate** — Variable references can only target paths that exist in the merged TOML table, not in the final typed struct. References are resolved before deserialization.
-- **`lookup_value` does not support array traversal** — References inside array elements are collected and resolved correctly (via position-indexed paths), but user-written reference paths like `${arr.0}` cannot traverse into arrays — `lookup_value` only navigates tables.
+- **User-written references cannot traverse arrays** — The internal `get_value`/`get_value_mut` functions support position-indexed array traversal (used for resolving references *inside* array elements), but user-written reference paths like `${arr.0}` go through `lookup_value`, which only navigates tables. Array elements can contain references, but references cannot target array elements.
