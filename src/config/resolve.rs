@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use super::source::value_kind;
 use super::ConfigError;
 use toml::{Table, Value};
 
@@ -26,7 +27,7 @@ pub fn resolve_references(table: &mut Table) -> Result<(), ConfigError> {
 
     // Phase 4: Process escape-only strings ($$ -> $ for strings without references)
     for path in &escape_only {
-        resolve_escapes_at_path(table, path);
+        resolve_escapes_at_path(table, path)?;
     }
 
     Ok(())
@@ -79,10 +80,11 @@ fn collect_from_value(
 }
 
 /// Replace $$ with $ in a string value at the given path (no reference resolution).
-fn resolve_escapes_at_path(table: &mut Table, path: &[String]) {
-    if let Ok(Value::String(s)) = get_value_mut(table, path) {
+fn resolve_escapes_at_path(table: &mut Table, path: &[String]) -> Result<(), ConfigError> {
+    if let Value::String(s) = get_value_mut(table, path)? {
         *s = s.replace("$$", "$");
     }
+    Ok(())
 }
 
 /// Parse all ${...} references from a string
@@ -179,7 +181,13 @@ fn resolve_at_path(table: &mut Table, path: &[String]) -> Result<(), ConfigError
     // Get the string value (clone to release borrow)
     let s = match get_value(table, path)? {
         Value::String(s) => s.clone(),
-        _ => return Ok(()),
+        other => {
+            return Err(ConfigError::ReferenceNotFound(format!(
+                "{} (expected string with references, found {})",
+                path.join("."),
+                value_kind(other),
+            )));
+        }
     };
 
     // Resolve and apply

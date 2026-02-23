@@ -38,6 +38,10 @@ impl ConfigSource for EnvSource {
                     .map(|s| s.to_lowercase())
                     .collect();
 
+                if path.iter().any(|s| s.is_empty()) {
+                    return Err(ConfigError::EmptyPathSegment { var: key.clone() });
+                }
+
                 let coerced_value = coerce_value(&value);
                 entries.push(ConfigEntry::at_path(path, coerced_value));
             }
@@ -260,5 +264,14 @@ mod tests {
         let err = source.entries().unwrap_err();
 
         assert!(matches!(err, ConfigError::InvalidSeparator));
+    }
+
+    #[test]
+    #[serial]
+    fn env_source_empty_segment_error() {
+        let _guard = EnvGuard::new(&[("EMPTYSEG__A____B", "value")]);
+        let source = EnvSource::new("EMPTYSEG", "__");
+        let err = source.entries().unwrap_err();
+        assert!(matches!(err, ConfigError::EmptyPathSegment { .. }));
     }
 }

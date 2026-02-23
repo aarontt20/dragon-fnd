@@ -116,7 +116,7 @@ This mirrors the graph-based approach already used in variable resolution — th
 
 ```rust
 let ctx = AppContext::builder()
-    .with_logging(LoggingBuilder::from_config(&config.logging))  // feature: "logging"
+    .with_logging(LoggingBuilder::from_config(config.logging))  // feature: "logging"
     .with_config(config)        // always available
     .with_database("app.db")    // feature: "sqlite" (planned)
     .with_shutdown()             // feature: "shutdown" (planned)

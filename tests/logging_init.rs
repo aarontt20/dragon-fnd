@@ -5,14 +5,16 @@ use dragon_fnd::AppContext;
 
 #[test]
 fn build_sync_with_console_logging() {
-    // Console-only logging (no file output) returns Ok with no WorkerGuard issues.
-    // Note: this may fail if the global subscriber was already set by another test.
-    let _ctx = AppContext::builder()
+    let result = AppContext::builder()
         .with_logging(LoggingBuilder::new().filter("warn"))
         .with_config("hello".to_string())
         .build_sync();
-    // We don't assert Ok because the global subscriber may already be set,
-    // which is fine — init_logging returns Ok(None) in that case.
+    // Config is valid; subscriber may or may not be set by another test
+    match result {
+        Ok(_) => {}
+        Err(dragon_fnd::Error::Logging(dragon_fnd::logging::LoggingError::SubscriberAlreadySet)) => {}
+        Err(e) => panic!("unexpected error: {e}"),
+    }
 }
 
 #[test]
@@ -30,7 +32,7 @@ fn build_sync_with_logging_disabled() {
 fn build_sync_with_file_logging() {
     let dir = tempfile::tempdir().unwrap();
 
-    let ctx = AppContext::builder()
+    let result = AppContext::builder()
         .with_logging(
             LoggingBuilder::new()
                 .filter("info")
@@ -44,10 +46,14 @@ fn build_sync_with_file_logging() {
         .with_config("test".to_string())
         .build_sync();
 
-    // May succeed or return Ok(None) if subscriber already set — both are fine.
-    // The key assertion is that it doesn't error from file setup.
-    assert!(ctx.is_ok());
-    assert!(dir.path().join("logs").exists());
+    // Config is valid; subscriber may or may not be set by another test
+    match result {
+        Ok(_) => {
+            assert!(dir.path().join("logs").exists());
+        }
+        Err(dragon_fnd::Error::Logging(dragon_fnd::logging::LoggingError::SubscriberAlreadySet)) => {}
+        Err(e) => panic!("unexpected error: {e}"),
+    }
 }
 
 #[test]
@@ -98,7 +104,12 @@ fn invalid_retention_skipped_when_file_disabled() {
         .with_config("test".to_string())
         .build_sync();
 
-    assert!(result.is_ok());
+    // Config is valid (file disabled skips validation); subscriber may already be set
+    match result {
+        Ok(_) => {}
+        Err(dragon_fnd::Error::Logging(dragon_fnd::logging::LoggingError::SubscriberAlreadySet)) => {}
+        Err(e) => panic!("unexpected error: {e}"),
+    }
 }
 
 #[test]
@@ -133,9 +144,16 @@ fn build_sync_with_size_rotation_creates_dir_and_active_file() {
         .with_config("test".to_string())
         .build_sync();
 
-    assert!(result.is_ok());
-    assert!(log_dir.exists(), "log directory should be created");
-    assert!(log_dir.join("app").exists(), "active log file should exist");
+    // Config is valid; subscriber may or may not be set by another test.
+    // File assertions only apply when subscriber was successfully set.
+    match result {
+        Ok(_) => {
+            assert!(log_dir.exists(), "log directory should be created");
+            assert!(log_dir.join("app").exists(), "active log file should exist");
+        }
+        Err(dragon_fnd::Error::Logging(dragon_fnd::logging::LoggingError::SubscriberAlreadySet)) => {}
+        Err(e) => panic!("unexpected error: {e}"),
+    }
 }
 
 #[test]
@@ -157,7 +175,12 @@ fn build_sync_with_size_rotation_and_compress_and_retain() {
         .with_config("test".to_string())
         .build_sync();
 
-    assert!(result.is_ok());
+    // Config is valid; subscriber may or may not be set by another test
+    match result {
+        Ok(_) => {}
+        Err(dragon_fnd::Error::Logging(dragon_fnd::logging::LoggingError::SubscriberAlreadySet)) => {}
+        Err(e) => panic!("unexpected error: {e}"),
+    }
 }
 
 #[test]

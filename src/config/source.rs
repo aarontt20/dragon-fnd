@@ -49,8 +49,18 @@ pub fn merge_at_path(table: &mut Table, path: &[String], value: Value) -> Result
     }
 
     // More path segments remain: ensure intermediate table exists
-    if !matches!(table.get(first), Some(Value::Table(_))) {
-        table.insert(first.clone(), Value::Table(Table::new()));
+    match table.get(first) {
+        Some(Value::Table(_)) => {} // already a table, fine
+        Some(existing) => {
+            return Err(ConfigError::TypeConflict {
+                path: first.clone(),
+                existing: value_kind(existing).to_string(),
+                incoming: "table".to_string(),
+            });
+        }
+        None => {
+            table.insert(first.clone(), Value::Table(Table::new()));
+        }
     }
 
     if let Some(Value::Table(nested)) = table.get_mut(first) {
@@ -60,7 +70,7 @@ pub fn merge_at_path(table: &mut Table, path: &[String], value: Value) -> Result
     Ok(())
 }
 
-fn value_kind(value: &Value) -> &'static str {
+pub(crate) fn value_kind(value: &Value) -> &'static str {
     match value {
         Value::String(_) => "string",
         Value::Integer(_) => "integer",
@@ -173,5 +183,19 @@ mod tests {
         );
         assert_eq!(at.path, vec!["my", "key"]);
         assert_eq!(at.value.as_str(), Some("val"));
+    }
+
+    #[test]
+    fn merge_at_path_type_conflict_at_intermediate() {
+        let mut table = Table::new();
+        table.insert("server".to_string(), Value::String("localhost".into()));
+
+        let result = merge_at_path(
+            &mut table,
+            &["server".to_string(), "port".to_string()],
+            Value::Integer(8080),
+        );
+
+        assert!(matches!(result, Err(ConfigError::TypeConflict { .. })));
     }
 }

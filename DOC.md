@@ -82,30 +82,6 @@ impl ConfigSource for MySource {
 
 - `entries(&self) -> Result<Vec<ConfigEntry>, ConfigError>` - Produces configuration entries to merge. Returns a vector of entries, each specifying a path and value. Entries are applied in order, so later entries override earlier ones.
 
-### `merge_at_path`
-
-```rust
-fn merge_at_path(table: &mut Table, path: &[String], value: Value) -> Result<(), ConfigError>
-```
-
-Merges a value at the given path into the table.
-
-This is the unified merge function that handles all merge scenarios:
-- Empty path with Table value: deep merge at root level
-- Empty path with non-Table value: returns `ConfigError::RootNotTable`
-- Non-empty path: navigate/create intermediate tables, then merge or replace
-
-Deep merging applies to nested tables: keys are merged recursively rather
-than replaced entirely. Non-table values (including arrays) replace entirely.
-
-### `deep_merge` (private)
-
-Deep merges an overlay table into a base table.
-
-For each key in overlay:
-- If both base and overlay have tables at that key, merge recursively
-- Otherwise, overlay value replaces base value
-
 ---
 
 ## Module: `config::builder`
@@ -307,9 +283,9 @@ For example, with prefix `"APP"` and separator `"__"`:
 - `APP__SERVER__PORT=8080` -> `["server", "port"]` = 8080
 
 Values are coerced from strings to the most specific type:
-- Integer (if all digits with optional leading `-`)
-- Float (if contains `.` and parses successfully)
 - Boolean (`true`/`false`, case-insensitive)
+- Integer (if all digits with optional leading `-`, no leading zeros)
+- Float (if contains `.` and parses successfully)
 - String (fallback)
 
 **Methods:**
@@ -398,6 +374,8 @@ Variants:
 - `NonScalarReference(String)` - Cannot reference non-scalar value
 - `UnclosedReference` - Unclosed reference (missing `}`)
 - `InvalidSeparator` - EnvSource separator is empty
+- `TypeConflict { path, existing, incoming }` - Non-table value at intermediate path would be replaced by table
+- `EmptyPathSegment { var }` - Environment variable produces empty path segment (consecutive separators)
 
 ---
 
@@ -463,7 +441,7 @@ The builder tracks two type-level dimensions:
 
 **Methods:**
 
-- `with_config<C>(self, config: C) -> AppContextBuilder<Configured<C>, SyncBuild>` - Provides the application configuration. Only available when `Cfg = NoConfig`.
+- `with_config<C>(self, config: C) -> AppContextBuilder<Configured<C>, A>` - Provides the application configuration. Only available when `Cfg = NoConfig`. Preserves the async type parameter.
 
 - `with_logging(self, builder: LoggingBuilder) -> Self` - Registers a logging configuration to be initialized at build time. Available on all builder states (before or after `with_config()`). Feature: `logging`.
 
@@ -556,6 +534,7 @@ Variants:
 - `InvalidRotation(String)` — invalid rotation config (max_bytes too small, combining max_bytes with time rotation, compress without rotation)
 - `InvalidRetention(String)` — invalid retention config (mutual exclusion, zero values, Never without max_bytes + retention)
 - `FileSetupFailed { dir, source }` — could not create log directory
+- `SubscriberAlreadySet` — global tracing subscriber already set; logging configuration was not applied
 
 ### Example: From Config File
 

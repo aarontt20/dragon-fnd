@@ -31,25 +31,36 @@ pub(crate) fn cleanup_old_logs(
         }
     };
 
-    // Collect matching files with their modification times
-    let mut files: Vec<(PathBuf, std::time::SystemTime)> = entries
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let path = entry.path();
-            if !path.is_file() {
-                return None;
+    // Collect matching files with their modification times.
+    // Uses an explicit loop instead of filter_map to surface I/O errors
+    // (read_dir entry failures, metadata failures) rather than silently skipping them.
+    let match_prefix = format!("{prefix}.");
+    let mut files: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                errors.push((dir.to_path_buf(), e));
+                continue;
             }
-            let name = path.file_name()?.to_str()?;
-            // Match "{prefix}." to avoid matching unrelated files (e.g. "app" matching "application.log").
-            // Rotated files always have the format "{prefix}.{date}", so the dot is always present.
-            let match_prefix = format!("{prefix}.");
-            if !name.starts_with(&match_prefix) {
-                return None;
-            }
-            let mtime = entry.metadata().ok()?.modified().ok()?;
-            Some((path, mtime))
-        })
-        .collect();
+        };
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue, // Non-UTF-8 filenames legitimately skipped
+        };
+        if !name.starts_with(&match_prefix) {
+            continue;
+        }
+        match entry.metadata().and_then(|m| m.modified()) {
+            Ok(mtime) => files.push((path, mtime)),
+            Err(e) => errors.push((path, e)),
+        }
+    }
 
     // Sort by modification time, newest first
     files.sort_by(|a, b| b.1.cmp(&a.1));

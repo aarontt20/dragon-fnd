@@ -16,6 +16,10 @@ pub enum LoggingError {
     #[error("failed to create log directory '{}'", dir.display())]
     FileSetupFailed {
         dir: PathBuf,
+        #[source]
         source: std::io::Error,
     },
+
+    #[error("global tracing subscriber already set — logging configuration was not applied")]
+    SubscriberAlreadySet,
 }

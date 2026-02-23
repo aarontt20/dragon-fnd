@@ -120,3 +120,35 @@ fn builder_error_propagates_from_source() {
         ConfigError::FileNotFound(_)
     ));
 }
+
+#[test]
+fn builder_deserialize_error_missing_field() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "name = \"test\"\n").unwrap();
+
+    let result = ConfigBuilder::new()
+        .with_file(&path, true)
+        .build::<SimpleConfig>();
+
+    assert!(matches!(result, Err(ConfigError::DeserializeError(_))));
+}
+
+#[test]
+fn builder_deserialize_error_wrong_type() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "name = \"test\"\nport = \"not_a_number\"\n").unwrap();
+
+    let result = ConfigBuilder::new()
+        .with_file(&path, true)
+        .build::<SimpleConfig>();
+
+    assert!(matches!(result, Err(ConfigError::DeserializeError(_))));
+}
+
+#[test]
+fn builder_no_sources() {
+    let result = ConfigBuilder::new().build::<SimpleConfig>();
+    assert!(matches!(result, Err(ConfigError::DeserializeError(_))));
+}

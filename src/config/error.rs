@@ -45,4 +45,14 @@ pub enum ConfigError {
 
     #[error("env source separator must not be empty")]
     InvalidSeparator,
+
+    #[error("type conflict at '{path}': existing {existing} would be replaced by {incoming}")]
+    TypeConflict {
+        path: String,
+        existing: String,
+        incoming: String,
+    },
+
+    #[error("environment variable '{var}' produces empty path segment (consecutive separators)")]
+    EmptyPathSegment { var: String },
 }

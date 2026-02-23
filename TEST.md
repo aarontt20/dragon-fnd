@@ -2,12 +2,12 @@
 
 Tests are inline (`#[cfg(test)]` modules in source files) plus integration tests in `tests/`.
 
-**Without logging feature: 58 unit tests + 8 integration tests + 2 doc-tests = 68 tests**
-**With logging feature: 113 unit tests + 19 integration tests + 2 doc-tests = 134 tests**
+**Without logging feature: 60 unit tests + 11 integration tests + 2 doc-tests = 73 tests**
+**With logging feature: 115 unit tests + 22 integration tests + 2 doc-tests = 139 tests**
 
 ---
 
-## Module: `config::source` (6 tests)
+## Module: `config::source` (7 tests)
 
 Tests for `merge_at_path()` and `ConfigEntry` constructors.
 
@@ -20,6 +20,7 @@ Tests for `merge_at_path()` and `ConfigEntry` constructors.
 | `merge_at_path_creates_intermediates` | Path navigation | Non-existent intermediate tables are created automatically when merging at deep paths like `["a", "b", "c"]` |
 | `merge_at_path_replaces_leaf` | Scalar replacement | Non-table values at leaf positions are replaced entirely |
 | `merge_at_path_merges_tables_at_leaf` | Table merge at leaf | When both existing and new values are tables at the target path, they are deep-merged |
+| `merge_at_path_type_conflict_at_intermediate` | Type conflict | Existing non-table value at an intermediate path segment returns `ConfigError::TypeConflict` |
 
 ### `ConfigEntry`
 
@@ -29,7 +30,7 @@ Tests for `merge_at_path()` and `ConfigEntry` constructors.
 
 ---
 
-## Module: `config::file` (3 tests)
+## Module: `config::file` (4 tests)
 
 Tests for `FileSource` TOML file loading.
 
@@ -38,15 +39,15 @@ Tests for `FileSource` TOML file loading.
 | `file_source_loads_valid_file` | Happy path | Valid TOML file is parsed and returned as single root-level `ConfigEntry` with parsed table |
 | `file_source_required_missing` | Required file error | Missing file with `required=true` returns `ConfigError::FileNotFound` |
 | `file_source_optional_missing` | Optional file skip | Missing file with `required=false` returns empty entries vector (no error) |
+| `file_source_parse_error` | Parse error | Invalid TOML syntax returns `ConfigError::ParseError` |
 
 ### Coverage Gaps
 
-- `ConfigError::ReadError` (I/O errors other than NotFound) - not tested
-- `ConfigError::ParseError` (invalid TOML syntax) - not tested
+- `ConfigError::ReadError` (I/O errors other than NotFound) - not tested (platform-specific: requires permission denied)
 
 ---
 
-## Module: `config::env` (13 tests)
+## Module: `config::env` (14 tests)
 
 Tests for `EnvSource` environment variable loading and `coerce_value()` type coercion.
 
@@ -61,7 +62,7 @@ Tests for `EnvSource` environment variable loading and `coerce_value()` type coe
 | `coerce_edge_cases` | Edge cases | Empty string → string; lone `-` → string; `"1.2.3"` (invalid float) → string |
 | `coerce_leading_zero_stays_string` | Leading zero rejection | `"007"`, `"01"`, `"-01"` stay as strings; `"0"` still parses as integer 0 |
 
-### `EnvSource` (7 tests)
+### `EnvSource` (8 tests)
 
 | Test | Coverage | Behavior Verified |
 |------|----------|-------------------|
@@ -72,6 +73,7 @@ Tests for `EnvSource` environment variable loading and `coerce_value()` type coe
 | `env_source_empty_path_ignored` | Empty path skip | `PREFIX__` (no path after separator) is silently ignored |
 | `env_source_custom_separator` | Separator config | Custom separator (e.g., `_` instead of `__`) works correctly |
 | `env_source_empty_separator_returns_error` | Validation | Empty separator returns `ConfigError::InvalidSeparator` from `entries()` |
+| `env_source_empty_segment_error` | Empty segment | Consecutive separators (e.g., `APP__A____B`) return `ConfigError::EmptyPathSegment` |
 
 ### Test Helpers
 
@@ -293,7 +295,7 @@ End-to-end tests for logging integration with AppContext (`tests/logging_init.rs
 
 ---
 
-## Integration Tests: `config_builder` (5 tests)
+## Integration Tests: `config_builder` (8 tests)
 
 End-to-end tests for `ConfigBuilder` (`tests/config_builder.rs`).
 
@@ -304,6 +306,9 @@ End-to-end tests for `ConfigBuilder` (`tests/config_builder.rs`).
 | `builder_with_custom_source` | Custom `ConfigSource` | User-defined source integrates via `with_source()` |
 | `builder_resolves_references` | Variable resolution | `${path}` references resolved during `build()` |
 | `builder_error_propagates_from_source` | Error propagation | Source errors surface through `build()` |
+| `builder_deserialize_error_missing_field` | Deserialize error | Missing required field returns `ConfigError::DeserializeError` |
+| `builder_deserialize_error_wrong_type` | Deserialize error | Wrong value type returns `ConfigError::DeserializeError` |
+| `builder_no_sources` | Zero sources | Building with no sources returns `ConfigError::DeserializeError` |
 
 ---
 
@@ -344,7 +349,7 @@ Tests for the type-state `AppContext` builder (`tests/context.rs`).
 - `SizeRotatingWriter` - creation, byte recovery, write tracking, rotation threshold, compression, rapid rotations, timestamp format, inline retention, gz retention
 
 ### Partially Covered
-- `FileSource` - happy path and not-found; missing I/O error and parse error cases
+- `FileSource` - happy path, not-found, and parse error; missing I/O error case (platform-specific)
 
 ### Not Covered
 - Error display strings (tested indirectly via `matches!` but not asserted on text)

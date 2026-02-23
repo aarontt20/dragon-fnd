@@ -15,7 +15,8 @@ use super::writer::SizeRotatingWriter;
 ///
 /// Returns `Ok(Some(guard))` when file logging is enabled (the guard must be held
 /// for the application lifetime to ensure log flushing). Returns `Ok(None)` when
-/// logging is disabled, console-only, or the global subscriber was already set.
+/// logging is disabled or console-only. Returns `Err(SubscriberAlreadySet)` if the
+/// global subscriber was already set.
 pub(crate) fn init_logging(config: &LoggingConfig) -> Result<Option<WorkerGuard>, LoggingError> {
     if !config.enabled {
         return Ok(None);
@@ -101,18 +102,12 @@ pub(crate) fn init_logging(config: &LoggingConfig) -> Result<Option<WorkerGuard>
     // Compose subscriber
     let subscriber = tracing_subscriber::registry().with(layers);
 
-    // Try to set the global subscriber. If it's already set, that's fine.
+    // Try to set the global subscriber. If it's already set, surface the error —
+    // silently ignoring means the user's logging configuration was not applied.
     match subscriber.try_init() {
         Ok(()) => {}
         Err(_) => {
-            // Subscriber not installed, so we can't use tracing::warn! — fall back to stderr.
-            for (path, err) in cleanup_errors {
-                eprintln!(
-                    "dragon-fnd: failed to remove old log file '{}': {err}",
-                    path.display()
-                );
-            }
-            return Ok(None);
+            return Err(LoggingError::SubscriberAlreadySet);
         }
     }
 
@@ -240,6 +235,16 @@ fn build_file_layer(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    /// Assert that init_logging accepted the config as valid.
+    /// SubscriberAlreadySet is OK — it means validation passed but the global subscriber was taken.
+    fn assert_config_accepted(result: Result<Option<WorkerGuard>, LoggingError>) {
+        match result {
+            Ok(_) => {}
+            Err(LoggingError::SubscriberAlreadySet) => {}
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
 
     #[test]
     fn build_env_filter_valid_base() {
@@ -392,7 +397,7 @@ mod tests {
         config.file.retain_files = Some(5);
         let result = init_logging(&config);
         // Should succeed (not error) — max_bytes provides rotation
-        assert!(result.is_ok());
+        assert_config_accepted(result);
     }
 
     #[test]
@@ -406,7 +411,7 @@ mod tests {
         config.file.retain_days = Some(7);
         let result = init_logging(&config);
         // Should succeed — max_bytes provides rotation, retain_days works
-        assert!(result.is_ok());
+        assert_config_accepted(result);
     }
 
     #[test]
@@ -420,7 +425,7 @@ mod tests {
         config.file.compress = true;
         let result = init_logging(&config);
         // Should succeed — compress + max_bytes is the valid compression path
-        assert!(result.is_ok());
+        assert_config_accepted(result);
     }
 
     #[test]
@@ -432,7 +437,7 @@ mod tests {
         config.file.rotation = Rotation::Never;
         config.file.max_bytes = Some(4096);
         let result = init_logging(&config);
-        assert!(result.is_ok());
+        assert_config_accepted(result);
     }
 
     #[test]

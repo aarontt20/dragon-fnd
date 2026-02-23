@@ -23,12 +23,12 @@ src/
 │   ├── file.rs            # FileSource: loads TOML files
 │   ├── env.rs             # EnvSource: loads environment variables
 │   ├── resolve.rs         # Graph-based ${path.to.field} variable resolution
-│   └── error.rs           # ConfigError enum (11 variants)
+│   └── error.rs           # ConfigError enum (13 variants)
 ├── logging/               # Feature: "logging"
 │   ├── mod.rs             # Re-exports, pub(crate) init_logging
 │   ├── config.rs          # LoggingConfig, ConsoleConfig, FileConfig, LogFormat, Rotation (serde)
 │   ├── builder.rs         # LoggingBuilder, ConsoleBuilder, FileBuilder (fluent API)
-│   ├── error.rs           # LoggingError enum (4 variants)
+│   ├── error.rs           # LoggingError enum (5 variants)
 │   ├── init.rs            # Subscriber initialization, layer composition, validation
 │   ├── retain.rs          # Retention cleanup: delete old rotated log files
 │   └── writer.rs          # SizeRotatingWriter: size-based rotation with compression
@@ -36,7 +36,7 @@ src/
     └── mod.rs             # AppContext<C> with type-state AppContextBuilder
 ```
 
-16 source files. Tests are inline (`#[cfg(test)]` modules) plus integration tests in `tests/`.
+17 source files. Tests are inline (`#[cfg(test)]` modules) plus integration tests in `tests/`.
 
 ---
 
@@ -68,7 +68,7 @@ Two constructors serve different use cases:
 `merge_at_path()` returns `Result<(), ConfigError>` and handles all merge scenarios with a `let-else` pattern for the empty-path case:
 1. **Empty path + table value**: deep merge at root level — nested tables merge recursively, non-table values return `ConfigError::RootNotTable`
 2. **Non-empty path, final key**: if both existing and incoming are tables, deep merge; otherwise replace entirely
-3. **Non-empty path, intermediate segments**: navigate to the target, auto-creating missing intermediate tables
+3. **Non-empty path, intermediate segments**: navigate to the target, auto-creating missing intermediate tables. If a non-table value already exists at an intermediate path, returns `ConfigError::TypeConflict` (e.g., scalar `server` when a later source tries to set `server.port`)
 
 `deep_merge()` is the recursive helper: for each key in the overlay, if both sides have tables at that key, recurse; otherwise the overlay value replaces the base value.
 
@@ -126,7 +126,7 @@ Deserialization happens once at build time. After `build()`, config access is a 
 
 ### Variable Resolution
 
-`src/config/resolve.rs` — the largest module (~275 lines). Uses a graph-based approach with three phases:
+`src/config/resolve.rs` — the most complex module. Uses a graph-based approach with four phases:
 
 **Phase 1 — Collection.** Walk the entire merged table. For each string value, parse `${path.to.field}` references. Collect them as `(source_path, target_path)` edge pairs. `$$` is recognized as an escape (skipped during collection). Unclosed `${` produces `ConfigError::UnclosedReference`. References inside array elements are collected with position-indexed paths (e.g., `["arr", "0"]`), so a string at `arr[0]` that contains `${some.ref}` is tracked and resolved correctly. Note: user-written reference paths like `${arr.0}` cannot traverse into arrays — `lookup_value` only navigates tables.
 
@@ -179,7 +179,7 @@ Layer composition uses `Vec<Box<dyn Layer<Registry> + Send + Sync>>` — layers 
 
 Each layer gets its own `EnvFilter`: the base filter (from `config.filter` + `config.modules`) plus an optional per-layer override. This enables patterns like "console at warn, file at debug".
 
-`try_init()` errors are all treated as "subscriber already set" and return `Ok(None)` — no string matching. If retention cleanup errors occurred before the subscriber was set, they are surfaced to stderr via `eprintln!` as a fallback.
+`try_init()` failure returns `LoggingError::SubscriberAlreadySet` — the user's logging configuration was not applied and they need to know.
 
 Validation runs when file logging is enabled, checking rotation rules before retention rules:
 1. `max_bytes` must be at least 4096
@@ -207,7 +207,7 @@ Key design decisions:
 
 ### Error Types (`src/logging/error.rs`)
 
-`LoggingError` — 4 variants, `#[non_exhaustive]`:
+`LoggingError` — 5 variants, `#[non_exhaustive]`:
 
 | Variant | Meaning |
 |---------|---------|
@@ -215,6 +215,7 @@ Key design decisions:
 | `InvalidRotation(String)` | Invalid rotation config (max_bytes too small, combining max_bytes with time rotation, compress without rotation) |
 | `InvalidRetention(String)` | Invalid retention config (mutual exclusion, zero values, Never without max_bytes + retention) |
 | `FileSetupFailed { dir, source }` | Could not create log directory (display shows path only; `source` available via `std::error::Error::source()`) |
+| `SubscriberAlreadySet` | Global tracing subscriber already set — logging configuration was not applied |
 
 ---
 
@@ -222,7 +223,7 @@ Key design decisions:
 
 ### ConfigError
 
-`src/config/error.rs` — 11 variants, `#[non_exhaustive]`:
+`src/config/error.rs` — 13 variants, `#[non_exhaustive]`:
 
 | Variant | Meaning |
 |---------|---------|
@@ -237,6 +238,8 @@ Key design decisions:
 | `NonScalarReference(String)` | Embedded reference targets a table or array |
 | `UnclosedReference` | Missing closing `}` in `${...}` |
 | `InvalidSeparator` | EnvSource separator is empty |
+| `TypeConflict { path, existing, incoming }` | Non-table value at intermediate path would be replaced by table (e.g., scalar `server` when env var sets `server.port`) |
+| `EmptyPathSegment { var }` | Environment variable produces empty path segment (consecutive separators) |
 
 ### Top-level Error
 
@@ -280,7 +283,7 @@ Two type-level dimensions:
 
 **Config presence** — `NoConfig` vs `Configured<C>`:
 - `AppContext::builder()` returns `AppContextBuilder<NoConfig, SyncBuild>`
-- `.with_config(config)` transitions to `AppContextBuilder<Configured<C>, SyncBuild>`
+- `.with_config(config)` transitions to `AppContextBuilder<Configured<C>, A>` (preserving the async parameter)
 - `build_sync()` only exists on `Configured<C>` — calling it without config is a compile error
 
 **Async requirements** — `SyncBuild` (only marker defined currently):

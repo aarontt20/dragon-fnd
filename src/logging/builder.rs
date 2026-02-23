@@ -70,6 +70,7 @@ impl Default for LoggingBuilder {
 
 /// Fluent builder for console output configuration.
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing until passed to LoggingBuilder"]
 pub struct ConsoleBuilder {
     config: ConsoleConfig,
 }
@@ -111,6 +112,7 @@ impl Default for ConsoleBuilder {
 ///
 /// Constructing a `FileBuilder` enables file output automatically.
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing until passed to LoggingBuilder"]
 pub struct FileBuilder {
     config: FileConfig,
 }
