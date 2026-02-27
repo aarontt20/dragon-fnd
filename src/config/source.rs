@@ -1,6 +1,68 @@
+use std::collections::BTreeMap;
+
 use toml::{Table, Value};
 
 use super::ConfigError;
+
+/// Library-owned value type for config entries.
+///
+/// Replaces `toml::Value` in the public API so that `ConfigSource` implementors
+/// don't need to depend on the `toml` crate.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfigValue {
+    String(String),
+    Integer(i64),
+    Float(f64),
+    Boolean(bool),
+    /// Stored as a string to avoid exposing `toml::Datetime`.
+    /// Parsed during internal conversion.
+    Datetime(String),
+    Array(Vec<ConfigValue>),
+    Table(ConfigTable),
+}
+
+/// An ordered map of string keys to config values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConfigTable(pub(crate) BTreeMap<String, ConfigValue>);
+
+impl ConfigValue {
+    pub fn string(s: impl Into<String>) -> Self {
+        Self::String(s.into())
+    }
+
+    pub fn integer(i: i64) -> Self {
+        Self::Integer(i)
+    }
+
+    pub fn float(f: f64) -> Self {
+        Self::Float(f)
+    }
+
+    pub fn boolean(b: bool) -> Self {
+        Self::Boolean(b)
+    }
+
+    pub fn datetime(s: impl Into<String>) -> Self {
+        Self::Datetime(s.into())
+    }
+}
+
+impl ConfigTable {
+    pub fn new() -> Self {
+        Self(BTreeMap::new())
+    }
+
+    pub fn insert(mut self, key: impl Into<String>, value: ConfigValue) -> Self {
+        self.0.insert(key.into(), value);
+        self
+    }
+}
+
+impl Default for ConfigTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ConfigEntry {
@@ -63,8 +125,24 @@ pub fn merge_at_path(table: &mut Table, path: &[String], value: Value) -> Result
         }
     }
 
-    if let Some(Value::Table(nested)) = table.get_mut(first) {
-        merge_at_path(nested, rest, value)?;
+    match table.get_mut(first) {
+        Some(Value::Table(nested)) => {
+            merge_at_path(nested, rest, value).map_err(|e| match e {
+                ConfigError::TypeConflict {
+                    path,
+                    existing,
+                    incoming,
+                } => ConfigError::TypeConflict {
+                    path: format!("{first}.{path}"),
+                    existing,
+                    incoming,
+                },
+                // Only RootNotTable is possible here; cannot occur with non-empty path
+                other => other,
+            })?;
+        }
+        // Preceding match ensures a Table exists at `first` (either pre-existing or freshly inserted)
+        _ => unreachable!("expected table at {first:?} after intermediate-key check"),
     }
 
     Ok(())
@@ -196,6 +274,134 @@ mod tests {
             Value::Integer(8080),
         );
 
-        assert!(matches!(result, Err(ConfigError::TypeConflict { .. })));
+        match result {
+            Err(ConfigError::TypeConflict { path, .. }) => {
+                assert_eq!(path, "server");
+            }
+            other => panic!("expected TypeConflict, got {other:?}"),
+        }
     }
+
+    #[test]
+    fn merge_at_path_type_conflict_preserves_full_path() {
+        let mut table = Table::new();
+        let mut db = Table::new();
+        db.insert("pool".to_string(), Value::String("invalid".into()));
+        table.insert("database".to_string(), Value::Table(db));
+
+        let result = merge_at_path(
+            &mut table,
+            &[
+                "database".to_string(),
+                "pool".to_string(),
+                "max".to_string(),
+            ],
+            Value::Integer(10),
+        );
+
+        match result {
+            Err(ConfigError::TypeConflict { path, .. }) => {
+                assert_eq!(path, "database.pool");
+            }
+            other => panic!("expected TypeConflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_at_path_type_conflict_three_levels_deep() {
+        let mut table = Table::new();
+        let mut a = Table::new();
+        let mut b = Table::new();
+        b.insert("c".to_string(), Value::String("leaf".into()));
+        a.insert("b".to_string(), Value::Table(b));
+        table.insert("a".to_string(), Value::Table(a));
+
+        let result = merge_at_path(
+            &mut table,
+            &[
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+                "d".to_string(),
+            ],
+            Value::Integer(42),
+        );
+
+        match result {
+            Err(ConfigError::TypeConflict { path, .. }) => {
+                assert_eq!(path, "a.b.c");
+            }
+            other => panic!("expected TypeConflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_at_empty_path_overlay_replaces_scalar() {
+        let mut table = Table::new();
+        table.insert("port".into(), Value::Integer(3000));
+
+        let mut overlay = Table::new();
+        overlay.insert("port".into(), Value::Integer(9000));
+
+        merge_at_path(&mut table, &[], Value::Table(overlay)).unwrap();
+        assert_eq!(table["port"].as_integer(), Some(9000));
+    }
+
+    #[test]
+    fn merge_at_path_scalar_replaces_table_at_leaf() {
+        let mut table = Table::new();
+        let mut nested = Table::new();
+        nested.insert("a".into(), Value::String("1".into()));
+        table.insert("key".into(), Value::Table(nested));
+
+        let path: Vec<String> = vec!["key".into()];
+        merge_at_path(&mut table, &path, Value::String("override".into())).unwrap();
+
+        assert_eq!(table["key"].as_str(), Some("override"));
+    }
+
+    // --- ConfigValue and ConfigTable tests ---
+
+    #[test]
+    fn config_value_string_constructor() {
+        let v = ConfigValue::string("hello");
+        assert_eq!(v, ConfigValue::String("hello".to_string()));
+    }
+
+    #[test]
+    fn config_value_integer_constructor() {
+        let v = ConfigValue::integer(42);
+        assert_eq!(v, ConfigValue::Integer(42));
+    }
+
+    #[test]
+    fn config_value_float_constructor() {
+        let v = ConfigValue::float(3.14);
+        assert_eq!(v, ConfigValue::Float(3.14));
+    }
+
+    #[test]
+    fn config_value_boolean_constructor() {
+        let v = ConfigValue::boolean(true);
+        assert_eq!(v, ConfigValue::Boolean(true));
+    }
+
+    #[test]
+    fn config_value_datetime_constructor() {
+        let v = ConfigValue::datetime("2026-01-15T10:30:00");
+        assert_eq!(v, ConfigValue::Datetime("2026-01-15T10:30:00".to_string()));
+    }
+
+    #[test]
+    fn config_table_new_and_insert() {
+        let table = ConfigTable::new()
+            .insert("host", ConfigValue::string("localhost"))
+            .insert("port", ConfigValue::integer(8080));
+        assert_eq!(table.0.len(), 2);
+        assert_eq!(
+            table.0.get("host"),
+            Some(&ConfigValue::String("localhost".to_string()))
+        );
+    }
+
 }
