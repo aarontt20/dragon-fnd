@@ -7,14 +7,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `docs/DESIGN.md` — How the built system works (architecture, current state)
 - `docs/VISION.md` — Where the project is going (planned subsystems, design philosophy)
 - `DOC.md` — API documentation
-- `TEST.md` — Test coverage documentation (115 unit + 22 integration + 2 doc-tests with logging feature)
+- `TEST.md` — Test coverage documentation (133 unit + 28 integration + 2 doc-tests with logging feature)
 
 ## Build Commands
 
 ```bash
 cargo build              # Build the library
-cargo test               # Run all tests (60 unit + 11 integration + 2 doc-tests)
-cargo test --features logging  # Run all tests including logging (115 unit + 22 integration + 2 doc-tests)
+cargo test               # Run all tests (79 unit + 18 integration + 2 doc-tests)
+cargo test --features logging  # Run all tests including logging (133 unit + 28 integration + 2 doc-tests)
 cargo test resolve       # Run tests matching "resolve"
 cargo clippy             # Run linter
 cargo doc --open         # Generate and view documentation
@@ -31,8 +31,8 @@ src/
 ├── lib.rs              # Crate root, re-exports public API
 ├── error.rs            # Top-level Error enum
 ├── config/
-│   ├── mod.rs          # Public exports: ConfigBuilder, ConfigError, ConfigSource, ConfigEntry
-│   ├── source.rs       # Core abstractions: ConfigSource trait, ConfigEntry, merge_at_path
+│   ├── mod.rs          # Public exports: ConfigBuilder, ConfigError, ConfigSource, ConfigEntry, ConfigValue, ConfigTable
+│   ├── source.rs       # Core abstractions: ConfigSource trait, ConfigEntry, ConfigValue, ConfigTable, merge_at_path
 │   ├── builder.rs      # ConfigBuilder orchestrating sources
 │   ├── file.rs         # FileSource: loads TOML files
 │   ├── env.rs          # EnvSource: loads environment variables
@@ -40,14 +40,14 @@ src/
 │   └── error.rs        # ConfigError enum
 ├── logging/            # Feature: "logging"
 │   ├── mod.rs          # Re-exports, pub(crate) init_logging
-│   ├── config.rs       # LoggingConfig, ConsoleConfig, FileConfig (serde types)
+│   ├── config.rs       # LoggingConfig, ConsoleConfig, FileConfig, RotationStrategy (serde types, private fields)
 │   ├── builder.rs      # LoggingBuilder, ConsoleBuilder, FileBuilder (fluent API)
 │   ├── error.rs        # LoggingError enum
 │   ├── init.rs         # Subscriber initialization, validation
 │   ├── retain.rs       # Retention cleanup for rotated log files
 │   └── writer.rs       # SizeRotatingWriter with compression
 └── context/
-    └── mod.rs          # AppContext with type-state AppContextBuilder
+    └── mod.rs          # AppContext with type-state AppContextBuilder, extension slot
 ```
 
 ### Core Abstractions
@@ -57,9 +57,15 @@ src/
 - Sources produce `Vec<ConfigEntry>` where each entry has a path and value
 - Unified `merge_at_path()` handles both root-level deep merges and path-targeted inserts
 
+**ConfigValue** (`src/config/source.rs`):
+- Library-owned value type replacing `toml::Value` in the public API
+- Variants: `String`, `Integer`, `Float`, `Boolean`, `Datetime`, `Array`, `Table(ConfigTable)`
+- `ConfigTable` is a newtype over `BTreeMap<String, ConfigValue>` with `new()` and `insert()`
+- Converted to `toml::Value` at the single merge boundary in `ConfigBuilder::build()`
+
 **ConfigEntry**:
 - `path: Vec<String>` - empty for root-level (files), non-empty for specific paths (env vars)
-- `value: toml::Value` - the value to merge
+- `value: ConfigValue` - the value to merge
 
 **Built-in sources**:
 - `FileSource` - reads TOML files, returns single root entry
@@ -92,7 +98,7 @@ impl ConfigSource for MyCustomSource {
     fn entries(&self) -> Result<Vec<ConfigEntry>, ConfigError> {
         Ok(vec![ConfigEntry::at_path(
             vec!["my".into(), "key".into()],
-            toml::Value::String("value".into()),
+            ConfigValue::string("value"),
         )])
     }
 }

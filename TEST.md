@@ -2,14 +2,14 @@
 
 Tests are inline (`#[cfg(test)]` modules in source files) plus integration tests in `tests/`.
 
-**Without logging feature: 60 unit tests + 11 integration tests + 2 doc-tests = 73 tests**
-**With logging feature: 115 unit tests + 22 integration tests + 2 doc-tests = 139 tests**
+**Without logging feature: 79 unit tests + 18 integration tests + 2 doc-tests = 99 tests**
+**With logging feature: 133 unit tests + 28 integration tests + 2 doc-tests = 163 tests**
 
 ---
 
-## Module: `config::source` (7 tests)
+## Module: `config::source` (25 tests)
 
-Tests for `merge_at_path()` and `ConfigEntry` constructors.
+Tests for `merge_at_path()`, `ConfigEntry` constructors, `ConfigValue`/`ConfigTable` types, and value conversions.
 
 ### `merge_at_path`
 
@@ -17,16 +17,44 @@ Tests for `merge_at_path()` and `ConfigEntry` constructors.
 |------|----------|-------------------|
 | `merge_at_empty_path_deep_merges` | Deep merge at root | Empty path with table value performs recursive merge; existing keys preserved, new keys added, nested tables merged (not replaced) |
 | `merge_at_empty_path_non_table_returns_error` | Root non-table error | Empty path with non-table value (e.g., integer) returns `ConfigError::RootNotTable` |
+| `merge_at_empty_path_overlay_replaces_scalar` | Scalar overlay | Empty path with table replaces existing scalar at same key |
 | `merge_at_path_creates_intermediates` | Path navigation | Non-existent intermediate tables are created automatically when merging at deep paths like `["a", "b", "c"]` |
 | `merge_at_path_replaces_leaf` | Scalar replacement | Non-table values at leaf positions are replaced entirely |
 | `merge_at_path_merges_tables_at_leaf` | Table merge at leaf | When both existing and new values are tables at the target path, they are deep-merged |
+| `merge_at_path_scalar_replaces_table_at_leaf` | Scalar replaces table | Scalar at leaf replaces existing table |
 | `merge_at_path_type_conflict_at_intermediate` | Type conflict | Existing non-table value at an intermediate path segment returns `ConfigError::TypeConflict` |
+| `merge_at_path_type_conflict_preserves_full_path` | Conflict path | `TypeConflict` error includes the full path to the conflict point |
+| `merge_at_path_type_conflict_three_levels_deep` | Deep conflict | Type conflict detected 3 levels deep in path navigation |
 
 ### `ConfigEntry`
 
 | Test | Coverage | Behavior Verified |
 |------|----------|-------------------|
 | `config_entry_constructors` | Constructor methods | `ConfigEntry::root()` creates entry with empty path; `ConfigEntry::at_path()` creates entry with specified path segments |
+
+### `ConfigValue` and `ConfigTable`
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `config_value_string_constructor` | String constructor | `ConfigValue::string("hello")` creates `String` variant |
+| `config_value_integer_constructor` | Integer constructor | `ConfigValue::integer(42)` creates `Integer` variant |
+| `config_value_float_constructor` | Float constructor | `ConfigValue::float(3.14)` creates `Float` variant |
+| `config_value_boolean_constructor` | Boolean constructor | `ConfigValue::boolean(true)` creates `Boolean` variant |
+| `config_value_datetime_constructor` | Datetime constructor | `ConfigValue::datetime("2024-01-01T00:00:00Z")` creates `Datetime` variant |
+| `config_table_new_and_insert` | Table constructor | `ConfigTable::new()` + `insert()` builds tables with chaining |
+| `config_value_datetime_round_trip` | Datetime conversion | Valid datetime string survives `ConfigValue → toml::Value → ConfigValue` round-trip |
+| `config_value_datetime_invalid_falls_back_to_string` | Datetime fallback | Invalid datetime string converts to `toml::Value::String` (not panic) |
+
+### `ConfigValue ↔ toml::Value` conversion
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `config_value_to_toml_value_scalars` | Scalar conversion | String, Integer, Float, Boolean all convert correctly to `toml::Value` |
+| `config_value_to_toml_value_array` | Array conversion | `ConfigValue::Array` converts to `toml::Value::Array` |
+| `config_value_to_toml_value_table` | Table conversion | `ConfigValue::Table` converts to `toml::Value::Table` |
+| `toml_value_to_config_value_scalars` | Reverse scalars | `toml::Value` scalars (String, Integer, Float, Boolean) convert to `ConfigValue` |
+| `toml_value_to_config_value_array` | Reverse array | `toml::Value::Array` converts to `ConfigValue::Array` |
+| `toml_value_to_config_value_nested_table` | Reverse table | Nested `toml::Value::Table` converts to nested `ConfigValue::Table` |
 
 ---
 
@@ -82,7 +110,7 @@ Tests for `EnvSource` environment variable loading and `coerce_value()` type coe
 
 ---
 
-## Module: `config::resolve` (35 tests)
+## Module: `config::resolve` (36 tests)
 
 Tests for `${path.to.field}` variable reference resolution, including string interpolation,
 full value substitution, graph-based dependency resolution, and error handling.
@@ -149,7 +177,7 @@ Graph-based resolution handles dependencies correctly.
 |------|----------|-------------------|
 | `get_value_empty_path_returns_error` | Empty path guard | `get_value` with empty path returns `ReferenceNotFound` instead of panicking |
 
-### Error Cases (12 tests)
+### Error Cases (13 tests)
 
 | Test | Coverage | Behavior Verified |
 |------|----------|-------------------|
@@ -165,6 +193,7 @@ Graph-based resolution handles dependencies correctly.
 | `non_scalar_in_interpolation` | Table in string | `"text ${table}"` → `NonScalarReference` |
 | `array_in_interpolation` | Array in string | `"items: ${array}"` → `NonScalarReference` |
 | `invalid_path_empty_segment` | Bad path | `${a..b}` → `InvalidReferencePath` |
+| `empty_reference_rejected` | Empty ref | `${}` → `InvalidReferencePath` |
 
 ### Coverage Notes
 
@@ -175,26 +204,28 @@ Graph-based resolution handles dependencies correctly.
 
 ---
 
-## Module: `logging::config` (10 tests, feature: `logging`)
+## Module: `logging::config` (12 tests, feature: `logging`)
 
-Tests for serde deserialization of logging config types.
+Tests for serde deserialization of logging config types including `RotationStrategy`.
 
 | Test | Coverage | Behavior Verified |
 |------|----------|-------------------|
 | `logging_config_defaults` | Default values | All defaults correct: enabled, info filter, console on, file off |
 | `full_toml_round_trip` | Complete config | Full TOML with all fields deserializes correctly |
 | `format_variants_parse` | LogFormat | `"pretty"`, `"json"`, `"compact"` all parse |
-| `rotation_variants_parse` | Rotation | `"daily"`, `"hourly"`, `"never"` all parse |
+| `rotation_variants_parse` | RotationStrategy | `"daily"`, `"hourly"`, `"never"` all parse as RotationStrategy variants |
+| `size_rotation_parses` | Size rotation | `rotation = "size"` with `max_bytes` deserializes to `RotationStrategy::SizeBased { max_bytes }` |
 | `retain_days_only` | Retention | `retain_days` without `retain_files` parses |
 | `retain_files_only` | Retention | `retain_files` without `retain_days` parses |
 | `console_filter_override_parses` | Per-layer filter | Console filter override parses correctly |
 | `file_filter_override_parses` | Per-layer filter | File filter override parses correctly |
-| `max_bytes_parses` | Size rotation | `max_bytes` field deserializes as `Option<u64>` |
 | `compress_parses` | Compression | `compress` field deserializes as `bool` |
+| `size_rotation_without_max_bytes_errors` | Validation | `rotation = "size"` without `max_bytes` returns deserialize error |
+| `unknown_rotation_strategy_errors` | Validation | Unknown rotation string returns deserialize error |
 
 ---
 
-## Module: `logging::builder` (12 tests, feature: `logging`)
+## Module: `logging::builder` (11 tests, feature: `logging`)
 
 Tests for fluent builder API.
 
@@ -206,16 +237,15 @@ Tests for fluent builder API.
 | `console_builder_overrides` | Console builder | `format()`, `filter()`, `enabled()` on ConsoleBuilder |
 | `file_builder_enables_by_default` | Auto-enable | `FileBuilder::new(dir)` sets `enabled = true` |
 | `file_builder_overrides` | File builder | All FileBuilder methods set correct fields |
-| `file_builder_max_bytes` | Size rotation | `max_bytes()` sets the field correctly |
 | `file_builder_compress` | Compression | `compress()` sets the field correctly |
-| `file_builder_size_rotation_full_chain` | Full chain | `max_bytes + compress + retain_files` compose correctly |
+| `file_builder_size_rotation_full_chain` | Full chain | `SizeBased + compress + retain_files` compose correctly |
 | `retain_days_clears_retain_files` | Mutual exclusion | `retain_days()` after `retain_files()` clears files |
 | `retain_files_clears_retain_days` | Mutual exclusion | `retain_files()` after `retain_days()` clears days |
 | `console_and_file_compose_into_logging_builder` | Composition | Full builder chain with console + file produces correct config |
 
 ---
 
-## Module: `logging::init` (19 tests, feature: `logging`)
+## Module: `logging::init` (17 tests, feature: `logging`)
 
 Tests for subscriber initialization, validation rules, and layer composition.
 
@@ -229,14 +259,12 @@ Tests for subscriber initialization, validation rules, and layer composition.
 | `retention_validation_both_set` | Validation | Both `retain_days` and `retain_files` returns `InvalidRetention` |
 | `retention_validation_zero_days` | Validation | `retain_days = 0` returns `InvalidRetention` |
 | `retention_validation_zero_files` | Validation | `retain_files = 0` returns `InvalidRetention` |
-| `retention_validation_never_rotation_with_retention` | Validation | `Rotation::Never` without `max_bytes` + retention returns `InvalidRetention` |
-| `rotation_validation_max_bytes_too_small` | Validation | `max_bytes < 4096` returns `InvalidRotation` |
-| `rotation_validation_max_bytes_with_daily` | Validation | `max_bytes` + time-based rotation returns `InvalidRotation` |
-| `rotation_validation_compress_with_hourly` | Validation | `compress` + time-based rotation returns `InvalidRotation` |
-| `rotation_validation_compress_without_rotation` | Validation | `compress` without any rotation returns `InvalidRotation` |
-| `rotation_validation_never_with_max_bytes_and_retain_files_allowed` | Validation | `max_bytes` + `retain_files` is valid (max_bytes provides rotation) |
-| `rotation_validation_never_with_max_bytes_and_retain_days_allowed` | Validation | `max_bytes` + `retain_days` is valid |
-| `rotation_validation_compress_with_max_bytes_allowed` | Validation | `compress` + `max_bytes` is valid |
+| `retention_validation_never_rotation_with_retention` | Validation | `RotationStrategy::Never` + retention returns `InvalidRetention` |
+| `rotation_validation_max_bytes_too_small` | Validation | `SizeBased { max_bytes < 4096 }` returns `InvalidRotation` |
+| `rotation_validation_compress_without_rotation` | Validation | `compress` with `Never` rotation returns `InvalidRotation` |
+| `rotation_validation_size_based_with_retain_files_allowed` | Validation | `SizeBased` + `retain_files` is valid |
+| `rotation_validation_size_based_with_retain_days_allowed` | Validation | `SizeBased` + `retain_days` is valid |
+| `rotation_validation_compress_with_size_based_allowed` | Validation | `compress` + `SizeBased` is valid |
 | `rotation_validation_max_bytes_boundary_pass` | Boundary | `max_bytes = 4096` (exact minimum) succeeds |
 | `rotation_validation_max_bytes_boundary_fail` | Boundary | `max_bytes = 4095` (below minimum) returns `InvalidRotation` |
 | `build_file_layer_creates_directory` | Dir creation | Nested log directory created automatically |
@@ -275,7 +303,7 @@ Tests for `SizeRotatingWriter` — size-based log file rotation with compression
 
 ---
 
-## Integration Tests: `logging_init` (11 tests, feature: `logging`)
+## Integration Tests: `logging_init` (10 tests, feature: `logging`)
 
 End-to-end tests for logging integration with AppContext (`tests/logging_init.rs`).
 
@@ -289,38 +317,44 @@ End-to-end tests for logging integration with AppContext (`tests/logging_init.rs
 | `with_logging_after_config` | Builder ordering | `with_logging()` after `with_config()` works |
 | `invalid_retention_skipped_when_file_disabled` | Validation gating | Conflicting retention values don't error when file logging is disabled |
 | `invalid_retention_config_errors` | Error propagation | Retention validation errors surface through `build_sync()` |
-| `build_sync_with_size_rotation_creates_dir_and_active_file` | Size rotation | Size-based rotation creates directory and active log file |
-| `build_sync_with_size_rotation_and_compress_and_retain` | Full chain | Size rotation + compress + retain_files compose through AppContext |
-| `invalid_max_bytes_with_time_rotation_errors_through_app_context` | Error propagation | Combining max_bytes with Daily rotation errors through `build_sync()` |
+| `build_sync_with_size_rotation_creates_dir_and_active_file` | Size rotation | `RotationStrategy::SizeBased` creates directory and active log file |
+| `build_sync_with_size_rotation_and_compress_and_retain` | Full chain | `SizeBased` + compress + retain_files compose through AppContext |
 
 ---
 
-## Integration Tests: `config_builder` (8 tests)
+## Integration Tests: `config_builder` (10 tests)
 
-End-to-end tests for `ConfigBuilder` (`tests/config_builder.rs`).
+End-to-end tests for `ConfigBuilder` (`tests/config_builder.rs`). Custom sources use `ConfigValue` constructors.
 
 | Test | Coverage | Behavior Verified |
 |------|----------|-------------------|
 | `builder_with_file_deserializes` | File → typed config | TOML file loaded and deserialized into struct |
 | `builder_multiple_sources_override` | Source ordering | Later sources override earlier sources |
-| `builder_with_custom_source` | Custom `ConfigSource` | User-defined source integrates via `with_source()` |
+| `builder_with_custom_source` | Custom `ConfigSource` | User-defined source with `ConfigValue` integrates via `with_source()` |
 | `builder_resolves_references` | Variable resolution | `${path}` references resolved during `build()` |
+| `builder_resolves_cross_source_references` | Cross-source refs | File source + custom source references resolve across boundaries |
 | `builder_error_propagates_from_source` | Error propagation | Source errors surface through `build()` |
+| `builder_propagates_custom_source_error` | Custom source error | Custom `ConfigSource` returning error propagates through `build()` |
 | `builder_deserialize_error_missing_field` | Deserialize error | Missing required field returns `ConfigError::DeserializeError` |
 | `builder_deserialize_error_wrong_type` | Deserialize error | Wrong value type returns `ConfigError::DeserializeError` |
 | `builder_no_sources` | Zero sources | Building with no sources returns `ConfigError::DeserializeError` |
 
 ---
 
-## Integration Tests: `context` (3 tests)
+## Integration Tests: `context` (8 tests)
 
-Tests for the type-state `AppContext` builder (`tests/context.rs`).
+Tests for the type-state `AppContext` builder and extension slot (`tests/context.rs`).
 
 | Test | Coverage | Behavior Verified |
 |------|----------|-------------------|
 | `builder_chain_with_config_and_build_sync` | Full chain | `builder() → with_config() → build_sync()` produces working context with config accessor |
 | `build_sync_returns_result` | Return type | `build_sync()` returns `Result<AppContext<C>, Error>` |
 | `app_context_debug_output` | Debug impl | Manual `Debug` impl produces meaningful output |
+| `extension_store_and_retrieve` | Extension basics | `with_extension()` + `extension::<T>()` stores and retrieves typed values |
+| `extension_missing_returns_none` | Extension miss | `extension::<T>()` returns `None` for unregistered types |
+| `extension_last_writer_wins` | Extension override | Registering same type twice keeps the last value |
+| `extension_before_config` | Extension ordering | `with_extension()` works before `with_config()` |
+| `extension_debug_shows_count` | Extension debug | Debug output includes extension count |
 
 ---
 
@@ -336,12 +370,13 @@ Tests for the type-state `AppContext` builder (`tests/context.rs`).
 ## Summary by Coverage Level
 
 ### Well Covered
-- `merge_at_path()` - all major code paths
+- `merge_at_path()` - all major code paths including type conflicts
+- `ConfigValue`/`ConfigTable` - constructors, bidirectional conversion, datetime round-trip
 - `coerce_value()` - all type coercion branches
 - `EnvSource::entries()` - prefix matching, path parsing, edge cases, validation
 - `resolve_references()` - comprehensive coverage including all error variants, type preservation, chaining
-- `ConfigBuilder` - file loading, source ordering, custom sources, error propagation
-- `AppContext` - type-state builder, fallible `build_sync()`, compile-time enforcement
+- `ConfigBuilder` - file loading, source ordering, custom sources, cross-source references, error propagation
+- `AppContext` - type-state builder, fallible `build_sync()`, compile-time enforcement, extension slot (store, retrieve, override, ordering, debug)
 - `LoggingConfig` - defaults, round-trip, all format/rotation variants, retention fields, per-layer filters
 - `LoggingBuilder` / `ConsoleBuilder` / `FileBuilder` - defaults, overrides, composition, mutual exclusion
 - `init_logging()` - filter building, disabled path, retention validation, rotation validation, boundary tests, directory creation

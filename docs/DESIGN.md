@@ -17,8 +17,8 @@ src/
 ├── lib.rs                 # Crate root, re-exports public API
 ├── error.rs               # Top-level Error enum (2 variants)
 ├── config/
-│   ├── mod.rs             # Public exports: ConfigBuilder, ConfigError, ConfigSource, ConfigEntry
-│   ├── source.rs          # ConfigSource trait, ConfigEntry, merge_at_path, deep_merge
+│   ├── mod.rs             # Public exports: ConfigBuilder, ConfigError, ConfigSource, ConfigEntry, ConfigValue, ConfigTable
+│   ├── source.rs          # ConfigSource trait, ConfigEntry, ConfigValue, ConfigTable, merge_at_path, deep_merge
 │   ├── builder.rs         # ConfigBuilder: fluent API, generic build::<T>()
 │   ├── file.rs            # FileSource: loads TOML files
 │   ├── env.rs             # EnvSource: loads environment variables
@@ -26,14 +26,14 @@ src/
 │   └── error.rs           # ConfigError enum (13 variants)
 ├── logging/               # Feature: "logging"
 │   ├── mod.rs             # Re-exports, pub(crate) init_logging
-│   ├── config.rs          # LoggingConfig, ConsoleConfig, FileConfig, LogFormat, Rotation (serde)
+│   ├── config.rs          # LoggingConfig, ConsoleConfig, FileConfig, LogFormat, RotationStrategy (serde, private fields)
 │   ├── builder.rs         # LoggingBuilder, ConsoleBuilder, FileBuilder (fluent API)
 │   ├── error.rs           # LoggingError enum (5 variants)
 │   ├── init.rs            # Subscriber initialization, layer composition, validation
 │   ├── retain.rs          # Retention cleanup: delete old rotated log files
 │   └── writer.rs          # SizeRotatingWriter: size-based rotation with compression
 └── context/
-    └── mod.rs             # AppContext<C> with type-state AppContextBuilder
+    └── mod.rs             # AppContext<C> with type-state AppContextBuilder, extension slot
 ```
 
 17 source files. Tests are inline (`#[cfg(test)]` modules) plus integration tests in `tests/`.
@@ -52,14 +52,16 @@ pub trait ConfigSource: Send + Sync + std::fmt::Debug {
 }
 ```
 
-Sources produce `ConfigEntry` values — each pairing a path with a TOML value:
+Sources produce `ConfigEntry` values — each pairing a path with a `ConfigValue`:
 
 ```rust
 pub struct ConfigEntry {
     pub path: Vec<String>,
-    pub value: toml::Value,
+    pub value: ConfigValue,
 }
 ```
+
+`ConfigValue` is the library-owned value type that replaces `toml::Value` in the public API. Variants: `String`, `Integer(i64)`, `Float(f64)`, `Boolean(bool)`, `Datetime(String)`, `Array(Vec<ConfigValue>)`, `Table(ConfigTable)`. `ConfigTable` is a newtype over `BTreeMap<String, ConfigValue>`. Conversion to `toml::Value` happens at a single boundary inside `ConfigBuilder::build()`.
 
 Two constructors serve different use cases:
 - `ConfigEntry::root(table)` — empty path, for sources that produce a complete table (files)
@@ -159,9 +161,9 @@ Serde-deserializable types for TOML configuration:
 
 - `LoggingConfig` — top-level: `enabled`, `filter` (EnvFilter directive), `modules` (per-module overrides), nested `console` and `file`
 - `ConsoleConfig` — `enabled`, `format`, optional `filter` override
-- `FileConfig` — `enabled`, `dir`, `prefix`, `format`, `rotation`, optional `filter` override, optional `max_bytes` (size-based rotation threshold), `compress` (gzip rotated files), optional `retain_days` or `retain_files` (mutually exclusive)
+- `FileConfig` — `enabled`, `dir`, `prefix`, `format`, `rotation` (`RotationStrategy`), optional `filter` override, `compress` (gzip rotated files), optional `retain_days` or `retain_files` (mutually exclusive). All fields are `pub(crate)` — accessed through builders, not direct field mutation. Uses custom `Deserialize` impl to map flat TOML into `RotationStrategy` enum.
 - `LogFormat` — `Pretty` | `Json` | `Compact`
-- `Rotation` — `Daily` | `Hourly` | `Never`
+- `RotationStrategy` — `Daily` | `Hourly` | `SizeBased { max_bytes: u64 }` | `Never`. Replaces the previous `Rotation` enum + separate `max_bytes` field — the invalid combination of `max_bytes` + time-based rotation is now structurally impossible.
 
 ### Builder Types (`src/logging/builder.rs`)
 
@@ -169,7 +171,7 @@ Fluent API wrapping the config types — no field duplication:
 
 - `LoggingBuilder` wraps `LoggingConfig`. Constructed via `new()` (defaults) or `from_config()` (bridging from deserialized config). Methods: `filter()`, `module()`, `enabled()`, `console()`, `file()`. `into_config()` is `pub(crate)` — consumed by `build_sync()`.
 - `ConsoleBuilder` wraps `ConsoleConfig`. Methods: `format()`, `filter()`, `enabled()`.
-- `FileBuilder` wraps `FileConfig`. Constructed via `new(dir)` which auto-enables file output. Methods: `prefix()`, `format()`, `filter()`, `rotation()`, `max_bytes()`, `compress()`, `retain_days()`, `retain_files()`. The two retention methods are mutually exclusive — each clears the other.
+- `FileBuilder` wraps `FileConfig`. Constructed via `new(dir)` which auto-enables file output. Methods: `prefix()`, `format()`, `filter()`, `rotation(RotationStrategy)`, `compress()`, `retain_days()`, `retain_files()`. The two retention methods are mutually exclusive — each clears the other. Size-based rotation is configured via `RotationStrategy::SizeBased { max_bytes }` — no separate `max_bytes()` method.
 
 ### Subscriber Initialization (`src/logging/init.rs`)
 
@@ -182,11 +184,12 @@ Each layer gets its own `EnvFilter`: the base filter (from `config.filter` + `co
 `try_init()` failure returns `LoggingError::SubscriberAlreadySet` — the user's logging configuration was not applied and they need to know.
 
 Validation runs when file logging is enabled, checking rotation rules before retention rules:
-1. `max_bytes` must be at least 4096
-2. `max_bytes` cannot combine with time-based rotation (`Daily`/`Hourly`)
-3. `compress` cannot combine with time-based rotation
-4. `compress` requires some form of rotation (`max_bytes` or time-based)
-5. Existing retention validation (mutual exclusion, zero values, `Never` without `max_bytes` + retention)
+1. `SizeBased { max_bytes }` where `max_bytes < 4096` returns `InvalidRotation`
+2. `compress` without rotation (`Never`) returns `InvalidRotation`
+3. Retention mutual exclusion (`retain_days` + `retain_files` both set), zero values
+4. `Never` rotation with retention returns `InvalidRetention`
+
+Note: the previous checks for `max_bytes + time-based rotation` and `compress + time-based rotation` are no longer needed — `RotationStrategy` makes these invalid combinations structurally impossible.
 
 ### Retention Cleanup (`src/logging/retain.rs`)
 
@@ -259,12 +262,13 @@ Key design decisions:
 ```rust
 pub struct AppContext<C> {
     config: C,
+    extensions: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
     #[cfg(feature = "logging")]
     log_guard: Option<WorkerGuard>,  // LAST field — drops last
 }
 ```
 
-`AppContext::config()` returns `&C` — zero-cost after build. The `log_guard` is held for its `Drop` implementation — when the context is dropped, the guard flushes pending log writes. It is the last struct field so it outlives all other subsystem handles during drop (Rust drops fields in declaration order).
+`AppContext::config()` returns `&C` — zero-cost after build. `extension::<T>()` returns `Option<&T>` — looks up a type-keyed value registered via `with_extension()` on the builder. The `extensions` field is declared before `log_guard` so extensions drop before the logging guard flushes. The `log_guard` is held for its `Drop` implementation — when the context is dropped, the guard flushes pending log writes. It is the last struct field so it outlives all other subsystem handles during drop (Rust drops fields in declaration order).
 
 ### Type-State Builder
 
@@ -274,6 +278,7 @@ The builder uses type-state to enforce correct construction at compile time:
 pub struct AppContextBuilder<Cfg, Async = SyncBuild> {
     cfg: Cfg,
     _async: PhantomData<Async>,
+    extensions: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
     #[cfg(feature = "logging")]
     logging: Option<LoggingBuilder>,
 }
@@ -292,7 +297,7 @@ Two type-level dimensions:
 
 `build_sync()` returns `Result<AppContext<C>, Error>`. Even with no subsystems registered, the signature is fallible — future subsystems also need it, and feature-flag-dependent signatures are confusing.
 
-**Subsystem registration** — `with_logging(LoggingBuilder)` is available on all builder states (`NoConfig` and `Configured<C>`) via a single generic `impl<Cfg, A>` block. This lets users register subsystems before or after providing config. The logging field is propagated through state transitions (`builder()` → `with_config()` → `build_sync()`).
+**Subsystem registration** — `with_logging(LoggingBuilder)` and `with_extension(T: Send + Sync + 'static)` are available on all builder states (`NoConfig` and `Configured<C>`) via generic `impl<Cfg, A>` blocks. This lets users register subsystems and extensions before or after providing config. Fields are propagated through state transitions (`builder()` → `with_config()` → `build_sync()`). Extensions use a type-map (`HashMap<TypeId, Box<dyn Any + Send + Sync>>`) — if the same type is registered twice, the last value wins.
 
 Marker types (`NoConfig`, `Configured<C>`, `SyncBuild`) are `pub` with `#[doc(hidden)]` — nameable for compiler error messages, hidden from generated docs. Standard Rust ecosystem convention for type-state markers.
 
@@ -324,7 +329,7 @@ Three always-on crates, plus optional crates behind feature flags:
 | `flate2` | 1 | Gzip compression for rotated log files | `logging` |
 | `time` | 0.3 (formatting, macros, std) | UTC timestamps for rotated filenames | `logging` |
 
-Dev dependencies: `tempfile` (filesystem tests), `serial_test` (env-var test serialization).
+Dev dependencies: `tempfile` (filesystem tests), `serial_test` (env-var test serialization), `toml` (integration tests for private-field configs).
 
 No async runtime. No CLI parser.
 

@@ -34,6 +34,37 @@ Configuration files support `${path.to.field}` variable references.
 
 Configuration loading and management.
 
+### `ConfigValue`
+
+Library-owned value type for configuration data. Replaces `toml::Value` in the public API.
+
+**Variants:**
+
+- `String(String)` — string value
+- `Integer(i64)` — integer value
+- `Float(f64)` — floating-point value
+- `Boolean(bool)` — boolean value
+- `Datetime(String)` — datetime as string (parsed to TOML datetime internally)
+- `Array(Vec<ConfigValue>)` — array of values
+- `Table(ConfigTable)` — key-value table
+
+**Constructors:**
+
+- `string(s: impl Into<String>) -> Self`
+- `integer(i: i64) -> Self`
+- `float(f: f64) -> Self`
+- `boolean(b: bool) -> Self`
+- `datetime(s: impl Into<String>) -> Self`
+
+### `ConfigTable`
+
+Newtype over `BTreeMap<String, ConfigValue>`.
+
+**Methods:**
+
+- `new() -> Self` — empty table
+- `insert(key: impl Into<String>, value: ConfigValue) -> &mut Self` — insert a key-value pair (chainable)
+
 ### `ConfigEntry`
 
 A single configuration entry to merge into the config table.
@@ -47,13 +78,13 @@ unified merge logic regardless of source type.
   Empty path means root-level merge (for complete tables like files).
   Non-empty path like `["database", "host"]` targets nested locations.
 
-- `value: Value` - The value to merge at the target path.
+- `value: ConfigValue` - The value to merge at the target path.
 
 **Methods:**
 
 - `root(table: Table) -> Self` - Creates a root-level entry (for merging complete tables).
 
-- `at_path(path: Vec<String>, value: Value) -> Self` - Creates an entry at a specific path.
+- `at_path(path: Vec<String>, value: ConfigValue) -> Self` - Creates an entry at a specific path.
 
 ### `ConfigSource` (trait)
 
@@ -71,7 +102,7 @@ impl ConfigSource for MySource {
         Ok(vec![
             ConfigEntry::at_path(
                 vec!["my".into(), "key".into()],
-                toml::Value::String("value".into()),
+                ConfigValue::string("value"),
             ),
         ])
     }
@@ -429,6 +460,8 @@ let config = ctx.config();  // &MyConfig, zero-cost
 
 - `config(&self) -> &C` - Returns a reference to the configuration. This is a zero-cost operation since the config was deserialized at build time.
 
+- `extension<T: Send + Sync + 'static>(&self) -> Option<&T>` - Returns a reference to an extension of type `T`, if one was registered via `with_extension()`.
+
 - `builder() -> AppContextBuilder<NoConfig>` - Creates a new builder for constructing an `AppContext`.
 
 ### `AppContextBuilder<Cfg, Async>`
@@ -443,6 +476,8 @@ The builder tracks two type-level dimensions:
 
 - `with_config<C>(self, config: C) -> AppContextBuilder<Configured<C>, A>` - Provides the application configuration. Only available when `Cfg = NoConfig`. Preserves the async type parameter.
 
+- `with_extension<T: Send + Sync + 'static>(self, ext: T) -> Self` - Stores an extension value, retrievable later via `AppContext::extension()`. Available on all builder states. If the same type is registered twice, the last value wins.
+
 - `with_logging(self, builder: LoggingBuilder) -> Self` - Registers a logging configuration to be initialized at build time. Available on all builder states (before or after `with_config()`). Feature: `logging`.
 
 - `build_sync(self) -> Result<AppContext<C>, Error>` - Builds the `AppContext`, initializing all registered subsystems. Only available when config is provided (`Cfg = Configured<C>`) and no async subsystems are registered (`Async = SyncBuild`). Returns an error if any subsystem fails to initialize.
@@ -455,9 +490,9 @@ Structured logging via `tracing` with console and file outputs.
 
 ### `LoggingConfig`
 
-Serde-deserializable logging configuration. Top-level fields:
+Serde-deserializable logging configuration. All fields are `pub(crate)` — accessed through `LoggingBuilder` or deserialized from TOML.
 
-- `enabled: bool` (default: `true`) — master switch
+- `enabled: bool` (default: `true`) — master switch; accessible via `enabled()` getter
 - `filter: String` (default: `"info"`) — base EnvFilter directive
 - `modules: BTreeMap<String, String>` (default: `{}`) — per-module overrides
 - `console: ConsoleConfig` — console output settings
@@ -465,20 +500,23 @@ Serde-deserializable logging configuration. Top-level fields:
 
 ### `ConsoleConfig`
 
+All fields `pub(crate)`.
+
 - `enabled: bool` (default: `true`)
 - `format: LogFormat` (default: `Pretty`)
 - `filter: Option<String>` — optional per-layer filter override
 
 ### `FileConfig`
 
+All fields are `pub(crate)` — configured through builders or deserialized from TOML. Uses custom `Deserialize` impl.
+
 - `enabled: bool` (default: `false`)
 - `dir: PathBuf` (default: `"./logs"`)
 - `prefix: String` (default: `"app"`)
 - `format: LogFormat` (default: `Json`)
-- `rotation: Rotation` (default: `Daily`)
+- `rotation: RotationStrategy` (default: `Daily`)
 - `filter: Option<String>` — optional per-layer filter override
-- `max_bytes: Option<u64>` — size-based rotation threshold (minimum 4096); cannot combine with time-based rotation
-- `compress: bool` (default: `false`) — gzip rotated files in background thread; requires `max_bytes` (time-based rotation compression is not yet supported)
+- `compress: bool` (default: `false`) — gzip rotated files in background thread; requires rotation (not `Never`)
 - `retain_days: Option<u32>` — delete files older than N days
 - `retain_files: Option<u32>` — keep only N most recent files
 
@@ -488,9 +526,11 @@ Serde-deserializable logging configuration. Top-level fields:
 
 `Pretty` | `Json` | `Compact`
 
-### `Rotation`
+### `RotationStrategy`
 
-`Daily` | `Hourly` | `Never`
+`Daily` | `Hourly` | `SizeBased { max_bytes: u64 }` | `Never`
+
+In TOML, `rotation = "size"` with `max_bytes = 10485760`. The `SizeBased` variant carries its `max_bytes` threshold (minimum 4096), making it structurally impossible to combine size-based settings with time-based rotation.
 
 ### `LoggingBuilder`
 
@@ -519,8 +559,7 @@ Fluent builder for logging configuration. Wraps `LoggingConfig` internally.
 - `prefix(self, prefix: impl Into<String>) -> Self`
 - `format(self, format: LogFormat) -> Self`
 - `filter(self, filter: impl Into<String>) -> Self`
-- `rotation(self, rotation: Rotation) -> Self`
-- `max_bytes(self, bytes: u64) -> Self` — size-based rotation threshold (minimum 4096)
+- `rotation(self, rotation: RotationStrategy) -> Self`
 - `compress(self, compress: bool) -> Self` — gzip rotated files in background thread
 - `retain_days(self, days: u32) -> Self` — clears retain_files
 - `retain_files(self, count: u32) -> Self` — clears retain_days
@@ -531,7 +570,7 @@ Errors that can occur when initializing the logging subsystem.
 
 Variants:
 - `InvalidFilter(String)` — malformed EnvFilter directive
-- `InvalidRotation(String)` — invalid rotation config (max_bytes too small, combining max_bytes with time rotation, compress without rotation)
+- `InvalidRotation(String)` — invalid rotation config (SizeBased max_bytes too small, compress without rotation)
 - `InvalidRetention(String)` — invalid retention config (mutual exclusion, zero values, Never without max_bytes + retention)
 - `FileSetupFailed { dir, source }` — could not create log directory
 - `SubscriberAlreadySet` — global tracing subscriber already set; logging configuration was not applied
@@ -550,7 +589,7 @@ format = "pretty"
 enabled = true
 dir = "./logs"
 prefix = "myapp"
-rotation = "never"
+rotation = "size"
 max_bytes = 10485760  # 10 MB size-based rotation
 compress = true
 retain_files = 5
@@ -568,7 +607,7 @@ let ctx = AppContext::builder()
 ### Example: Programmatic Builder
 
 ```rust
-use dragon_fnd::logging::{LoggingBuilder, ConsoleBuilder, FileBuilder, LogFormat, Rotation};
+use dragon_fnd::logging::{LoggingBuilder, ConsoleBuilder, FileBuilder, LogFormat, RotationStrategy};
 
 let ctx = AppContext::builder()
     .with_logging(
@@ -580,7 +619,7 @@ let ctx = AppContext::builder()
                 FileBuilder::new("./logs")
                     .prefix("myapp")
                     .format(LogFormat::Json)
-                    .rotation(Rotation::Daily)
+                    .rotation(RotationStrategy::Daily)
                     .retain_days(14),
             ),
     )
