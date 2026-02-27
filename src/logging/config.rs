@@ -11,15 +11,22 @@ use serde::Deserialize;
 #[serde(default)]
 pub struct LoggingConfig {
     /// Master switch. When false, no subscriber is initialized.
-    pub enabled: bool,
+    pub(crate) enabled: bool,
     /// Base `EnvFilter` directive (e.g. `"info"`, `"debug,hyper=warn"`).
-    pub filter: String,
+    pub(crate) filter: String,
     /// Per-module level overrides. Keys are module paths, values are level strings.
-    pub modules: BTreeMap<String, String>,
+    pub(crate) modules: BTreeMap<String, String>,
     /// Console output configuration.
-    pub console: ConsoleConfig,
+    pub(crate) console: ConsoleConfig,
     /// File output configuration.
-    pub file: FileConfig,
+    pub(crate) file: FileConfig,
+}
+
+impl LoggingConfig {
+    /// Whether logging is enabled.
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
 }
 
 impl Default for LoggingConfig {
@@ -38,11 +45,11 @@ impl Default for LoggingConfig {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct ConsoleConfig {
-    pub enabled: bool,
-    pub format: LogFormat,
+    pub(crate) enabled: bool,
+    pub(crate) format: LogFormat,
     /// Optional per-layer filter override. When set, this layer uses its own
     /// `EnvFilter` instead of the base filter.
-    pub filter: Option<String>,
+    pub(crate) filter: Option<String>,
 }
 
 impl Default for ConsoleConfig {
@@ -58,20 +65,20 @@ impl Default for ConsoleConfig {
 /// File output configuration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileConfig {
-    pub enabled: bool,
-    pub dir: PathBuf,
-    pub prefix: String,
-    pub format: LogFormat,
+    pub(crate) enabled: bool,
+    pub(crate) dir: PathBuf,
+    pub(crate) prefix: String,
+    pub(crate) format: LogFormat,
     /// Optional per-layer filter override.
-    pub filter: Option<String>,
-    pub rotation: RotationStrategy,
+    pub(crate) filter: Option<String>,
+    pub(crate) rotation: RotationStrategy,
     /// Whether to gzip-compress rotated log files. Requires rotation to be enabled
     /// (a rotation strategy other than `Never`).
-    pub compress: bool,
+    pub(crate) compress: bool,
     /// Delete log files older than this many days. Mutually exclusive with `retain_files`.
-    pub retain_days: Option<u32>,
+    pub(crate) retain_days: Option<u32>,
     /// Keep only this many most recent log files. Mutually exclusive with `retain_days`.
-    pub retain_files: Option<u32>,
+    pub(crate) retain_files: Option<u32>,
 }
 
 impl Default for FileConfig {

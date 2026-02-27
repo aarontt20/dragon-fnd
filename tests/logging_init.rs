@@ -94,10 +94,15 @@ fn with_logging_after_config() {
 #[test]
 fn invalid_retention_skipped_when_file_disabled() {
     // Conflicting retention values should not error when file logging is disabled.
-    let mut config = dragon_fnd::logging::LoggingConfig::default();
-    config.file.enabled = false;
-    config.file.retain_days = Some(7);
-    config.file.retain_files = Some(10);
+    let config: dragon_fnd::logging::LoggingConfig = toml::from_str(
+        r#"
+        [file]
+        enabled = false
+        retain_days = 7
+        retain_files = 10
+        "#,
+    )
+    .unwrap();
 
     let result = AppContext::builder()
         .with_logging(LoggingBuilder::from_config(config))
@@ -114,10 +119,15 @@ fn invalid_retention_skipped_when_file_disabled() {
 
 #[test]
 fn invalid_retention_config_errors() {
-    let mut config = dragon_fnd::logging::LoggingConfig::default();
-    config.file.enabled = true;
-    config.file.retain_days = Some(7);
-    config.file.retain_files = Some(10);
+    let config: dragon_fnd::logging::LoggingConfig = toml::from_str(
+        r#"
+        [file]
+        enabled = true
+        retain_days = 7
+        retain_files = 10
+        "#,
+    )
+    .unwrap();
 
     let result = AppContext::builder()
         .with_logging(LoggingBuilder::from_config(config))
