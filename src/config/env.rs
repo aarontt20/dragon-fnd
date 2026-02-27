@@ -1,6 +1,4 @@
-use toml::Value;
-
-use super::source::{ConfigEntry, ConfigSource};
+use super::source::{ConfigEntry, ConfigSource, ConfigValue};
 use super::ConfigError;
 
 #[derive(Debug, Clone)]
@@ -47,35 +45,39 @@ impl ConfigSource for EnvSource {
             }
         }
 
+        // Sort by path for deterministic merge order — std::env::vars()
+        // iteration order is unspecified and can vary between runs.
+        entries.sort_by(|a, b| a.path.cmp(&b.path));
+
         Ok(entries)
     }
 }
 
-fn coerce_value(s: &str) -> Value {
+fn coerce_value(s: &str) -> ConfigValue {
     // Try boolean first (case-insensitive)
     if s.eq_ignore_ascii_case("true") {
-        return Value::Boolean(true);
+        return ConfigValue::boolean(true);
     }
     if s.eq_ignore_ascii_case("false") {
-        return Value::Boolean(false);
+        return ConfigValue::boolean(false);
     }
 
     // Try integer (only if it looks like an integer: optional minus, then digits)
     if looks_like_integer(s) {
         if let Ok(i) = s.parse::<i64>() {
-            return Value::Integer(i);
+            return ConfigValue::integer(i);
         }
     }
 
     // Try float (if contains decimal point)
     if s.contains('.') {
         if let Ok(f) = s.parse::<f64>() {
-            return Value::Float(f);
+            return ConfigValue::float(f);
         }
     }
 
     // Fallback to string
-    Value::String(s.to_string())
+    ConfigValue::string(s)
 }
 
 fn looks_like_integer(s: &str) -> bool {
@@ -123,46 +125,46 @@ mod tests {
 
     #[test]
     fn coerce_integer() {
-        assert_eq!(coerce_value("42"), Value::Integer(42));
-        assert_eq!(coerce_value("-7"), Value::Integer(-7));
-        assert_eq!(coerce_value("0"), Value::Integer(0));
+        assert_eq!(coerce_value("42"), ConfigValue::Integer(42));
+        assert_eq!(coerce_value("-7"), ConfigValue::Integer(-7));
+        assert_eq!(coerce_value("0"), ConfigValue::Integer(0));
     }
 
     #[test]
     fn coerce_float() {
-        assert_eq!(coerce_value("3.15"), Value::Float(3.15));
-        assert_eq!(coerce_value("-1.5"), Value::Float(-1.5));
-        assert_eq!(coerce_value("0.0"), Value::Float(0.0));
+        assert_eq!(coerce_value("3.15"), ConfigValue::Float(3.15));
+        assert_eq!(coerce_value("-1.5"), ConfigValue::Float(-1.5));
+        assert_eq!(coerce_value("0.0"), ConfigValue::Float(0.0));
     }
 
     #[test]
     fn coerce_boolean() {
-        assert_eq!(coerce_value("true"), Value::Boolean(true));
-        assert_eq!(coerce_value("false"), Value::Boolean(false));
-        assert_eq!(coerce_value("TRUE"), Value::Boolean(true));
-        assert_eq!(coerce_value("False"), Value::Boolean(false));
+        assert_eq!(coerce_value("true"), ConfigValue::Boolean(true));
+        assert_eq!(coerce_value("false"), ConfigValue::Boolean(false));
+        assert_eq!(coerce_value("TRUE"), ConfigValue::Boolean(true));
+        assert_eq!(coerce_value("False"), ConfigValue::Boolean(false));
     }
 
     #[test]
     fn coerce_string() {
-        assert_eq!(coerce_value("hello"), Value::String("hello".into()));
-        assert_eq!(coerce_value("007"), Value::String("007".into()));
+        assert_eq!(coerce_value("hello"), ConfigValue::String("hello".to_string()));
+        assert_eq!(coerce_value("007"), ConfigValue::String("007".to_string()));
     }
 
     #[test]
     fn coerce_leading_zero_stays_string() {
-        assert_eq!(coerce_value("007"), Value::String("007".into()));
-        assert_eq!(coerce_value("01"), Value::String("01".into()));
-        assert_eq!(coerce_value("-01"), Value::String("-01".into()));
+        assert_eq!(coerce_value("007"), ConfigValue::String("007".to_string()));
+        assert_eq!(coerce_value("01"), ConfigValue::String("01".to_string()));
+        assert_eq!(coerce_value("-01"), ConfigValue::String("-01".to_string()));
         // Single zero is fine
-        assert_eq!(coerce_value("0"), Value::Integer(0));
+        assert_eq!(coerce_value("0"), ConfigValue::Integer(0));
     }
 
     #[test]
     fn coerce_edge_cases() {
-        assert_eq!(coerce_value(""), Value::String("".into()));
-        assert_eq!(coerce_value("-"), Value::String("-".into()));
-        assert_eq!(coerce_value("1.2.3"), Value::String("1.2.3".into()));
+        assert_eq!(coerce_value(""), ConfigValue::String("".to_string()));
+        assert_eq!(coerce_value("-"), ConfigValue::String("-".to_string()));
+        assert_eq!(coerce_value("1.2.3"), ConfigValue::String("1.2.3".to_string()));
     }
 
     // --- EnvSource tests ---
@@ -177,12 +179,13 @@ mod tests {
 
         let source = EnvSource::new("TEST1", "__");
         let entries = source.entries().unwrap();
+        assert_eq!(entries.len(), 2);
 
         let name_entry = entries.iter().find(|e| e.path == vec!["name"]).unwrap();
-        assert_eq!(name_entry.value, Value::String("hello".into()));
+        assert_eq!(name_entry.value, ConfigValue::String("hello".to_string()));
 
         let port_entry = entries.iter().find(|e| e.path == vec!["port"]).unwrap();
-        assert_eq!(port_entry.value, Value::Integer(8080));
+        assert_eq!(port_entry.value, ConfigValue::Integer(8080));
     }
 
     #[test]
@@ -195,12 +198,13 @@ mod tests {
 
         let source = EnvSource::new("TEST2", "__");
         let entries = source.entries().unwrap();
+        assert_eq!(entries.len(), 2);
 
         let ab = entries.iter().find(|e| e.path == vec!["a", "b"]).unwrap();
-        assert_eq!(ab.value, Value::String("nested".into()));
+        assert_eq!(ab.value, ConfigValue::String("nested".to_string()));
 
         let xy = entries.iter().find(|e| e.path == vec!["x", "y"]).unwrap();
-        assert_eq!(xy.value, Value::String("also_nested".into()));
+        assert_eq!(xy.value, ConfigValue::String("also_nested".to_string()));
     }
 
     #[test]
@@ -212,7 +216,7 @@ mod tests {
         let entries = source.entries().unwrap();
 
         let entry = entries.iter().find(|e| e.path == vec!["upper_case"]).unwrap();
-        assert_eq!(entry.value, Value::String("value".into()));
+        assert_eq!(entry.value, ConfigValue::String("value".to_string()));
     }
 
     #[test]
@@ -255,7 +259,7 @@ mod tests {
         let entries = source.entries().unwrap();
 
         let entry = entries.iter().find(|e| e.path == vec!["a", "b"]).unwrap();
-        assert_eq!(entry.value, Value::String("value".into()));
+        assert_eq!(entry.value, ConfigValue::String("value".to_string()));
     }
 
     #[test]

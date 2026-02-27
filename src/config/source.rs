@@ -117,18 +117,18 @@ impl From<Value> for ConfigValue {
 #[derive(Debug, Clone)]
 pub struct ConfigEntry {
     pub path: Vec<String>,
-    pub value: Value,
+    pub value: ConfigValue,
 }
 
 impl ConfigEntry {
     pub fn root(table: Table) -> Self {
         Self {
             path: Vec::new(),
-            value: Value::Table(table),
+            value: Value::Table(table).into(),
         }
     }
 
-    pub fn at_path(path: Vec<String>, value: Value) -> Self {
+    pub fn at_path(path: Vec<String>, value: ConfigValue) -> Self {
         Self { path, value }
     }
 }
@@ -303,14 +303,14 @@ mod tests {
 
         let root = ConfigEntry::root(t);
         assert!(root.path.is_empty());
-        assert!(root.value.is_table());
+        assert!(matches!(root.value, ConfigValue::Table(_)));
 
         let at = ConfigEntry::at_path(
             vec!["my".into(), "key".into()],
-            Value::String("val".into()),
+            ConfigValue::string("val"),
         );
         assert_eq!(at.path, vec!["my", "key"]);
-        assert_eq!(at.value.as_str(), Some("val"));
+        assert_eq!(at.value, ConfigValue::String("val".to_string()));
     }
 
     #[test]

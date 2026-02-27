@@ -1,4 +1,4 @@
-use dragon_fnd::{ConfigBuilder, ConfigEntry, ConfigError, ConfigSource};
+use dragon_fnd::{ConfigBuilder, ConfigEntry, ConfigError, ConfigSource, ConfigValue};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -66,11 +66,11 @@ fn builder_with_custom_source() {
     let source = StaticSource::new(vec![
         ConfigEntry::at_path(
             vec!["name".into()],
-            toml::Value::String("from-source".into()),
+            ConfigValue::string("from-source"),
         ),
         ConfigEntry::at_path(
             vec!["port".into()],
-            toml::Value::Integer(4000),
+            ConfigValue::integer(4000),
         ),
     ]);
 
@@ -151,4 +151,42 @@ fn builder_deserialize_error_wrong_type() {
 fn builder_no_sources() {
     let result = ConfigBuilder::new().build::<SimpleConfig>();
     assert!(matches!(result, Err(ConfigError::DeserializeError(_))));
+}
+
+#[test]
+fn builder_resolves_cross_source_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "host = \"localhost\"\n").unwrap();
+
+    let source = StaticSource::new(vec![ConfigEntry::at_path(
+        vec!["url".into()],
+        ConfigValue::string("http://${host}:8080"),
+    )]);
+
+    let config: ResolvedConfig = ConfigBuilder::new()
+        .with_file(&path, true)
+        .with_source(source)
+        .build()
+        .unwrap();
+
+    assert_eq!(config.url, "http://localhost:8080");
+}
+
+#[test]
+fn builder_propagates_custom_source_error() {
+    #[derive(Debug)]
+    struct FailingSource;
+
+    impl ConfigSource for FailingSource {
+        fn entries(&self) -> Result<Vec<ConfigEntry>, ConfigError> {
+            Err(ConfigError::InvalidSeparator)
+        }
+    }
+
+    let result = ConfigBuilder::new()
+        .with_source(FailingSource)
+        .build::<SimpleConfig>();
+
+    assert!(matches!(result, Err(ConfigError::InvalidSeparator)));
 }

@@ -7,4 +7,4 @@ mod source;
 
 pub use builder::ConfigBuilder;
 pub use error::ConfigError;
-pub use source::{ConfigEntry, ConfigSource};
+pub use source::{ConfigEntry, ConfigSource, ConfigTable, ConfigValue};

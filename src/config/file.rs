@@ -65,7 +65,9 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert!(entries[0].path.is_empty());
-        assert_eq!(entries[0].value["server"]["port"].as_integer(), Some(8080));
+        // Convert back to toml::Value to verify content
+        let tv: toml::Value = entries[0].value.clone().into();
+        assert_eq!(tv["server"]["port"].as_integer(), Some(8080));
     }
 
     #[test]
