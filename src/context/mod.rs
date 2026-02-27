@@ -1,3 +1,5 @@
+use std::any::{Any, TypeId};
+use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use crate::Error;
@@ -48,6 +50,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 /// ```
 pub struct AppContext<C> {
     config: C,
+    extensions: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
     // Future feature-gated fields:
     // #[cfg(feature = "sqlite")]
     // db_pool: Pool,
@@ -60,6 +63,7 @@ impl<C: std::fmt::Debug> std::fmt::Debug for AppContext<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_struct("AppContext");
         s.field("config", &self.config);
+        s.field("extensions", &self.extensions.len());
         #[cfg(feature = "logging")]
         s.field("log_guard", &"<WorkerGuard>");
         s.finish()
@@ -71,6 +75,13 @@ impl<C> AppContext<C> {
     pub fn config(&self) -> &C {
         &self.config
     }
+
+    /// Returns a reference to an extension of type `T`, if one was registered.
+    pub fn extension<T: Send + Sync + 'static>(&self) -> Option<&T> {
+        self.extensions
+            .get(&TypeId::of::<T>())
+            .and_then(|boxed| boxed.downcast_ref::<T>())
+    }
 }
 
 impl AppContext<()> {
@@ -79,6 +90,7 @@ impl AppContext<()> {
         AppContextBuilder {
             cfg: NoConfig,
             _async: PhantomData,
+            extensions: HashMap::new(),
             #[cfg(feature = "logging")]
             logging: None,
         }
@@ -112,6 +124,7 @@ pub struct SyncBuild;
 pub struct AppContextBuilder<Cfg, Async = SyncBuild> {
     cfg: Cfg,
     _async: PhantomData<Async>,
+    extensions: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
     #[cfg(feature = "logging")]
     logging: Option<crate::logging::LoggingBuilder>,
 }
@@ -119,6 +132,7 @@ pub struct AppContextBuilder<Cfg, Async = SyncBuild> {
 impl<Cfg, A> std::fmt::Debug for AppContextBuilder<Cfg, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_struct("AppContextBuilder");
+        s.field("extensions", &self.extensions.len());
         #[cfg(feature = "logging")]
         s.field("logging", &self.logging.is_some());
         s.finish()
@@ -132,9 +146,21 @@ impl<A> AppContextBuilder<NoConfig, A> {
         AppContextBuilder {
             cfg: Configured(config),
             _async: PhantomData,
+            extensions: self.extensions,
             #[cfg(feature = "logging")]
             logging: self.logging,
         }
+    }
+}
+
+impl<Cfg, A> AppContextBuilder<Cfg, A> {
+    /// Stores an extension value, retrievable later via [`AppContext::extension()`].
+    ///
+    /// Available on all builder states. If the same type is registered twice,
+    /// the last value wins.
+    pub fn with_extension<T: Send + Sync + 'static>(mut self, ext: T) -> Self {
+        self.extensions.insert(TypeId::of::<T>(), Box::new(ext));
+        self
     }
 }
 
@@ -163,6 +189,7 @@ impl<C> AppContextBuilder<Configured<C>, SyncBuild> {
 
         Ok(AppContext {
             config: self.cfg.0,
+            extensions: self.extensions,
             #[cfg(feature = "logging")]
             log_guard,
         })
