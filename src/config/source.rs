@@ -64,6 +64,56 @@ impl Default for ConfigTable {
     }
 }
 
+impl From<ConfigValue> for Value {
+    fn from(cv: ConfigValue) -> Self {
+        match cv {
+            ConfigValue::String(s) => Value::String(s),
+            ConfigValue::Integer(i) => Value::Integer(i),
+            ConfigValue::Float(f) => Value::Float(f),
+            ConfigValue::Boolean(b) => Value::Boolean(b),
+            ConfigValue::Datetime(s) => {
+                // Parse the string as a TOML datetime. If parsing fails (e.g., the
+                // user passed a non-datetime string to ConfigValue::datetime()), fall
+                // back to Value::String. This is acceptable because the conversion is
+                // internal — the resulting toml::Value feeds into merge/resolve, not
+                // back to the user. Invalid datetime strings surface as type errors
+                // during final deserialization.
+                s.parse::<toml::value::Datetime>()
+                    .map(Value::Datetime)
+                    .unwrap_or_else(|_| Value::String(s))
+            }
+            ConfigValue::Array(arr) => {
+                Value::Array(arr.into_iter().map(Value::from).collect())
+            }
+            ConfigValue::Table(table) => {
+                Value::Table(
+                    table.0.into_iter().map(|(k, v)| (k, Value::from(v))).collect(),
+                )
+            }
+        }
+    }
+}
+
+impl From<Value> for ConfigValue {
+    fn from(tv: Value) -> Self {
+        match tv {
+            Value::String(s) => ConfigValue::String(s),
+            Value::Integer(i) => ConfigValue::Integer(i),
+            Value::Float(f) => ConfigValue::Float(f),
+            Value::Boolean(b) => ConfigValue::Boolean(b),
+            Value::Datetime(d) => ConfigValue::Datetime(d.to_string()),
+            Value::Array(arr) => {
+                ConfigValue::Array(arr.into_iter().map(ConfigValue::from).collect())
+            }
+            Value::Table(table) => {
+                ConfigValue::Table(ConfigTable(
+                    table.into_iter().map(|(k, v)| (k, ConfigValue::from(v))).collect(),
+                ))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ConfigEntry {
     pub path: Vec<String>,
@@ -404,4 +454,120 @@ mod tests {
         );
     }
 
+    // --- ConfigValue <-> toml::Value conversion tests ---
+
+    #[test]
+    fn config_value_to_toml_value_scalars() {
+        let cv = ConfigValue::string("hello");
+        let tv: Value = cv.into();
+        assert_eq!(tv, Value::String("hello".into()));
+
+        let cv = ConfigValue::integer(42);
+        let tv: Value = cv.into();
+        assert_eq!(tv, Value::Integer(42));
+
+        let cv = ConfigValue::boolean(true);
+        let tv: Value = cv.into();
+        assert_eq!(tv, Value::Boolean(true));
+
+        let cv = ConfigValue::float(3.14);
+        let tv: Value = cv.into();
+        assert_eq!(tv, Value::Float(3.14));
+    }
+
+    #[test]
+    fn config_value_to_toml_value_table() {
+        let cv = ConfigValue::Table(
+            ConfigTable::new().insert("key", ConfigValue::string("val")),
+        );
+        let tv: Value = cv.into();
+        assert!(tv.is_table());
+        assert_eq!(tv["key"].as_str(), Some("val"));
+    }
+
+    #[test]
+    fn config_value_to_toml_value_array() {
+        let cv = ConfigValue::Array(vec![
+            ConfigValue::integer(1),
+            ConfigValue::integer(2),
+        ]);
+        let tv: Value = cv.into();
+        assert!(tv.is_array());
+        assert_eq!(tv.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn toml_value_to_config_value_scalars() {
+        let tv = Value::String("hello".into());
+        let cv: ConfigValue = tv.into();
+        assert_eq!(cv, ConfigValue::String("hello".to_string()));
+
+        let tv = Value::Integer(42);
+        let cv: ConfigValue = tv.into();
+        assert_eq!(cv, ConfigValue::Integer(42));
+
+        let tv = Value::Float(2.72);
+        let cv: ConfigValue = tv.into();
+        assert_eq!(cv, ConfigValue::Float(2.72));
+
+        let tv = Value::Boolean(false);
+        let cv: ConfigValue = tv.into();
+        assert_eq!(cv, ConfigValue::Boolean(false));
+    }
+
+    #[test]
+    fn toml_value_to_config_value_array() {
+        let arr = Value::Array(vec![Value::Integer(1), Value::String("two".into())]);
+        let cv: ConfigValue = arr.into();
+        match cv {
+            ConfigValue::Array(items) => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0], ConfigValue::Integer(1));
+                assert_eq!(items[1], ConfigValue::String("two".to_string()));
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_value_datetime_round_trip() {
+        // Valid TOML datetime parses successfully
+        let cv = ConfigValue::datetime("2026-01-15T10:30:00");
+        let tv: Value = cv.into();
+        assert!(tv.is_datetime(), "valid datetime string should parse to Value::Datetime");
+
+        // Round-trip back preserves as Datetime variant
+        let cv2: ConfigValue = tv.into();
+        match cv2 {
+            ConfigValue::Datetime(s) => assert!(s.contains("2026-01-15")),
+            other => panic!("expected Datetime, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_value_datetime_invalid_falls_back_to_string() {
+        let cv = ConfigValue::datetime("not-a-datetime");
+        let tv: Value = cv.into();
+        // Invalid datetime falls back to Value::String
+        assert_eq!(tv, Value::String("not-a-datetime".into()));
+    }
+
+    #[test]
+    fn toml_value_to_config_value_nested_table() {
+        let mut inner = Table::new();
+        inner.insert("a".into(), Value::Integer(1));
+        let mut outer = Table::new();
+        outer.insert("nested".into(), Value::Table(inner));
+
+        let cv: ConfigValue = Value::Table(outer).into();
+        match cv {
+            ConfigValue::Table(t) => match t.0.get("nested") {
+                Some(ConfigValue::Table(inner)) => {
+                    assert_eq!(inner.0.get("a"), Some(&ConfigValue::Integer(1)));
+                }
+                other => panic!("expected nested table, got {other:?}"),
+            },
+            other => panic!("expected table, got {other:?}"),
+        }
+    }
 }
