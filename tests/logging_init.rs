@@ -1,6 +1,6 @@
 #![cfg(feature = "logging")]
 
-use dragon_fnd::logging::{FileBuilder, LogFormat, LoggingBuilder, Rotation};
+use dragon_fnd::logging::{FileBuilder, LogFormat, LoggingBuilder, RotationStrategy};
 use dragon_fnd::AppContext;
 
 #[test]
@@ -40,7 +40,7 @@ fn build_sync_with_file_logging() {
                     FileBuilder::new(dir.path().join("logs"))
                         .prefix("test")
                         .format(LogFormat::Json)
-                        .rotation(Rotation::Never),
+                        .rotation(RotationStrategy::Never),
                 ),
         )
         .with_config("test".to_string())
@@ -137,8 +137,9 @@ fn build_sync_with_size_rotation_creates_dir_and_active_file() {
             LoggingBuilder::new().filter("info").file(
                 FileBuilder::new(&log_dir)
                     .prefix("app")
-                    .rotation(Rotation::Never)
-                    .max_bytes(10_485_760),
+                    .rotation(RotationStrategy::SizeBased {
+                        max_bytes: 10_485_760,
+                    }),
             ),
         )
         .with_config("test".to_string())
@@ -166,8 +167,9 @@ fn build_sync_with_size_rotation_and_compress_and_retain() {
             LoggingBuilder::new().filter("info").file(
                 FileBuilder::new(&log_dir)
                     .prefix("app")
-                    .rotation(Rotation::Never)
-                    .max_bytes(10_485_760)
+                    .rotation(RotationStrategy::SizeBased {
+                        max_bytes: 10_485_760,
+                    })
                     .compress(true)
                     .retain_files(5),
             ),
@@ -181,23 +183,4 @@ fn build_sync_with_size_rotation_and_compress_and_retain() {
         Err(dragon_fnd::Error::Logging(dragon_fnd::logging::LoggingError::SubscriberAlreadySet)) => {}
         Err(e) => panic!("unexpected error: {e}"),
     }
-}
-
-#[test]
-fn invalid_max_bytes_with_time_rotation_errors_through_app_context() {
-    let dir = tempfile::tempdir().unwrap();
-
-    let result = AppContext::builder()
-        .with_logging(
-            LoggingBuilder::new().filter("info").file(
-                FileBuilder::new(dir.path())
-                    .prefix("app")
-                    .rotation(Rotation::Daily)
-                    .max_bytes(10_485_760),
-            ),
-        )
-        .with_config("test".to_string())
-        .build_sync();
-
-    assert!(result.is_err());
 }

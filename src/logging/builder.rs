@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use super::config::{ConsoleConfig, FileConfig, LogFormat, LoggingConfig, Rotation};
+use super::config::{ConsoleConfig, FileConfig, LogFormat, LoggingConfig, RotationStrategy};
 
 /// Fluent builder for logging configuration.
 ///
@@ -148,7 +148,7 @@ impl FileBuilder {
     }
 
     /// Set the rotation strategy.
-    pub fn rotation(mut self, rotation: Rotation) -> Self {
+    pub fn rotation(mut self, rotation: RotationStrategy) -> Self {
         self.config.rotation = rotation;
         self
     }
@@ -164,12 +164,6 @@ impl FileBuilder {
     pub fn retain_files(mut self, count: u32) -> Self {
         self.config.retain_files = Some(count);
         self.config.retain_days = None;
-        self
-    }
-
-    /// Set size-based rotation threshold in bytes.
-    pub fn max_bytes(mut self, bytes: u64) -> Self {
-        self.config.max_bytes = Some(bytes);
         self
     }
 
@@ -216,7 +210,7 @@ mod tests {
         assert!(result.file.enabled);
         assert_eq!(result.file.dir, PathBuf::from("/var/log"));
         assert_eq!(result.file.prefix, "myapp");
-        assert_eq!(result.file.rotation, Rotation::Hourly);
+        assert_eq!(result.file.rotation, RotationStrategy::Hourly);
         assert_eq!(result.file.retain_days, Some(14));
     }
 
@@ -262,13 +256,13 @@ mod tests {
             .prefix("myapp")
             .format(LogFormat::Compact)
             .filter("debug")
-            .rotation(Rotation::Hourly)
+            .rotation(RotationStrategy::Hourly)
             .retain_days(30);
 
         assert_eq!(file.config.prefix, "myapp");
         assert_eq!(file.config.format, LogFormat::Compact);
         assert_eq!(file.config.filter.as_deref(), Some("debug"));
-        assert_eq!(file.config.rotation, Rotation::Hourly);
+        assert_eq!(file.config.rotation, RotationStrategy::Hourly);
         assert_eq!(file.config.retain_days, Some(30));
         assert!(file.config.retain_files.is_none());
     }
@@ -294,12 +288,6 @@ mod tests {
     }
 
     #[test]
-    fn file_builder_max_bytes() {
-        let file = FileBuilder::new("./logs").max_bytes(10_485_760);
-        assert_eq!(file.config.max_bytes, Some(10_485_760));
-    }
-
-    #[test]
     fn file_builder_compress() {
         let file = FileBuilder::new("./logs").compress(true);
         assert!(file.config.compress);
@@ -310,16 +298,21 @@ mod tests {
         let builder = LoggingBuilder::new().file(
             FileBuilder::new("./logs")
                 .prefix("myapp")
-                .rotation(Rotation::Never)
-                .max_bytes(10_485_760)
+                .rotation(RotationStrategy::SizeBased {
+                    max_bytes: 10_485_760,
+                })
                 .compress(true)
                 .retain_files(5),
         );
 
         let config = builder.into_config();
         assert!(config.file.enabled);
-        assert_eq!(config.file.rotation, Rotation::Never);
-        assert_eq!(config.file.max_bytes, Some(10_485_760));
+        assert_eq!(
+            config.file.rotation,
+            RotationStrategy::SizeBased {
+                max_bytes: 10_485_760
+            }
+        );
         assert!(config.file.compress);
         assert_eq!(config.file.retain_files, Some(5));
     }
@@ -332,7 +325,7 @@ mod tests {
             .file(
                 FileBuilder::new("./logs")
                     .prefix("test")
-                    .rotation(Rotation::Daily)
+                    .rotation(RotationStrategy::Daily)
                     .retain_days(7),
             );
 
@@ -341,7 +334,7 @@ mod tests {
         assert_eq!(config.console.format, LogFormat::Pretty);
         assert!(config.file.enabled);
         assert_eq!(config.file.prefix, "test");
-        assert_eq!(config.file.rotation, Rotation::Daily);
+        assert_eq!(config.file.rotation, RotationStrategy::Daily);
         assert_eq!(config.file.retain_days, Some(7));
     }
 }

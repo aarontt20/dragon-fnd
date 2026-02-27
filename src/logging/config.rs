@@ -56,8 +56,7 @@ impl Default for ConsoleConfig {
 }
 
 /// File output configuration.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FileConfig {
     pub enabled: bool,
     pub dir: PathBuf,
@@ -65,12 +64,9 @@ pub struct FileConfig {
     pub format: LogFormat,
     /// Optional per-layer filter override.
     pub filter: Option<String>,
-    pub rotation: Rotation,
-    /// Maximum size in bytes before rotating the active log file.
-    /// When set, `rotation` must be `Never` (time + size composition is not yet supported).
-    pub max_bytes: Option<u64>,
+    pub rotation: RotationStrategy,
     /// Whether to gzip-compress rotated log files. Requires rotation to be enabled
-    /// (either via `max_bytes` or a time-based `rotation` other than `Never`).
+    /// (a rotation strategy other than `Never`).
     pub compress: bool,
     /// Delete log files older than this many days. Mutually exclusive with `retain_files`.
     pub retain_days: Option<u32>,
@@ -86,8 +82,7 @@ impl Default for FileConfig {
             prefix: "app".to_string(),
             format: LogFormat::Json,
             filter: None,
-            rotation: Rotation::Daily,
-            max_bytes: None,
+            rotation: RotationStrategy::Daily,
             compress: false,
             retain_days: None,
             retain_files: None,
@@ -105,12 +100,85 @@ pub enum LogFormat {
 }
 
 /// Log file rotation strategy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Rotation {
+#[derive(Debug, Clone, PartialEq)]
+pub enum RotationStrategy {
     Daily,
     Hourly,
+    SizeBased { max_bytes: u64 },
     Never,
+}
+
+impl<'de> Deserialize<'de> for FileConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(default)]
+        struct Raw {
+            enabled: bool,
+            dir: PathBuf,
+            prefix: String,
+            format: LogFormat,
+            filter: Option<String>,
+            rotation: String,
+            max_bytes: Option<u64>,
+            compress: bool,
+            retain_days: Option<u32>,
+            retain_files: Option<u32>,
+        }
+
+        impl Default for Raw {
+            fn default() -> Self {
+                let defaults = FileConfig::default();
+                Self {
+                    enabled: defaults.enabled,
+                    dir: defaults.dir,
+                    prefix: defaults.prefix,
+                    format: defaults.format,
+                    filter: defaults.filter,
+                    rotation: "daily".to_string(),
+                    max_bytes: None,
+                    compress: defaults.compress,
+                    retain_days: defaults.retain_days,
+                    retain_files: defaults.retain_files,
+                }
+            }
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+
+        let rotation = match raw.rotation.as_str() {
+            "daily" => RotationStrategy::Daily,
+            "hourly" => RotationStrategy::Hourly,
+            "never" => RotationStrategy::Never,
+            "size" => {
+                let max_bytes = raw.max_bytes.ok_or_else(|| {
+                    serde::de::Error::custom(
+                        "rotation = \"size\" requires max_bytes to be set",
+                    )
+                })?;
+                RotationStrategy::SizeBased { max_bytes }
+            }
+            other => {
+                return Err(serde::de::Error::custom(format!(
+                    "unknown rotation strategy: '{other}' (expected daily, hourly, never, or size)"
+                )));
+            }
+        };
+
+        Ok(FileConfig {
+            enabled: raw.enabled,
+            dir: raw.dir,
+            prefix: raw.prefix,
+            format: raw.format,
+            filter: raw.filter,
+            rotation,
+            compress: raw.compress,
+            retain_days: raw.retain_days,
+            retain_files: raw.retain_files,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -129,8 +197,7 @@ mod tests {
         assert_eq!(config.file.dir, PathBuf::from("./logs"));
         assert_eq!(config.file.prefix, "app");
         assert_eq!(config.file.format, LogFormat::Json);
-        assert_eq!(config.file.rotation, Rotation::Daily);
-        assert!(config.file.max_bytes.is_none());
+        assert_eq!(config.file.rotation, RotationStrategy::Daily);
         assert!(!config.file.compress);
         assert!(config.file.retain_days.is_none());
         assert!(config.file.retain_files.is_none());
@@ -187,15 +254,43 @@ mod tests {
     }
 
     #[test]
-    fn max_bytes_parses() {
+    fn size_rotation_parses() {
         let config: LoggingConfig = toml::from_str(
             r#"
             [file]
+            rotation = "size"
             max_bytes = 10485760
             "#,
         )
         .unwrap();
-        assert_eq!(config.file.max_bytes, Some(10_485_760));
+        assert_eq!(
+            config.file.rotation,
+            RotationStrategy::SizeBased {
+                max_bytes: 10_485_760
+            }
+        );
+    }
+
+    #[test]
+    fn size_rotation_without_max_bytes_errors() {
+        let result: Result<LoggingConfig, _> = toml::from_str(
+            r#"
+            [file]
+            rotation = "size"
+            "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unknown_rotation_strategy_errors() {
+        let result: Result<LoggingConfig, _> = toml::from_str(
+            r#"
+            [file]
+            rotation = "weekly"
+            "#,
+        );
+        assert!(result.is_err());
     }
 
     #[test]
@@ -212,9 +307,6 @@ mod tests {
 
     #[test]
     fn full_toml_round_trip() {
-        // Note: this config combines max_bytes with rotation="hourly", which is
-        // rejected at init time. This is intentional — the test verifies that
-        // deserialization is permissive; validation is deferred to init_logging().
         let config: LoggingConfig = toml::from_str(
             r#"
             enabled = true
@@ -233,7 +325,6 @@ mod tests {
             format = "json"
             filter = "debug"
             rotation = "hourly"
-            max_bytes = 52428800
             compress = true
             retain_days = 30
             "#,
@@ -253,8 +344,7 @@ mod tests {
         assert_eq!(config.file.prefix, "myapp");
         assert_eq!(config.file.format, LogFormat::Json);
         assert_eq!(config.file.filter.as_deref(), Some("debug"));
-        assert_eq!(config.file.rotation, Rotation::Hourly);
-        assert_eq!(config.file.max_bytes, Some(52_428_800));
+        assert_eq!(config.file.rotation, RotationStrategy::Hourly);
         assert!(config.file.compress);
         assert_eq!(config.file.retain_days, Some(30));
     }
@@ -262,13 +352,22 @@ mod tests {
     #[test]
     fn rotation_variants_parse() {
         let daily: LoggingConfig = toml::from_str("[file]\nrotation = \"daily\"").unwrap();
-        assert_eq!(daily.file.rotation, Rotation::Daily);
+        assert_eq!(daily.file.rotation, RotationStrategy::Daily);
 
         let hourly: LoggingConfig = toml::from_str("[file]\nrotation = \"hourly\"").unwrap();
-        assert_eq!(hourly.file.rotation, Rotation::Hourly);
+        assert_eq!(hourly.file.rotation, RotationStrategy::Hourly);
 
         let never: LoggingConfig = toml::from_str("[file]\nrotation = \"never\"").unwrap();
-        assert_eq!(never.file.rotation, Rotation::Never);
+        assert_eq!(never.file.rotation, RotationStrategy::Never);
+
+        let size: LoggingConfig =
+            toml::from_str("[file]\nrotation = \"size\"\nmax_bytes = 1048576").unwrap();
+        assert_eq!(
+            size.file.rotation,
+            RotationStrategy::SizeBased {
+                max_bytes: 1_048_576
+            }
+        );
     }
 
     #[test]

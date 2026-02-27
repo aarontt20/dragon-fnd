@@ -6,7 +6,7 @@ use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::Layer;
 
-use super::config::{FileConfig, LogFormat, LoggingConfig, Rotation};
+use super::config::{FileConfig, LogFormat, LoggingConfig, RotationStrategy};
 use super::error::LoggingError;
 use super::retain;
 use super::writer::SizeRotatingWriter;
@@ -24,25 +24,19 @@ pub(crate) fn init_logging(config: &LoggingConfig) -> Result<Option<WorkerGuard>
 
     // Validate file config (only when file logging is active)
     if config.file.enabled {
-        // Rotation rules (checked first)
-        if config.file.max_bytes.is_some_and(|b| b < 4096) {
-            return Err(LoggingError::InvalidRotation(
-                "max_bytes must be at least 4096".to_string(),
-            ));
+        // Size-based validation
+        if let RotationStrategy::SizeBased { max_bytes } = config.file.rotation {
+            if max_bytes < 4096 {
+                return Err(LoggingError::InvalidRotation(
+                    "max_bytes must be at least 4096".to_string(),
+                ));
+            }
         }
-        if config.file.max_bytes.is_some() && config.file.rotation != Rotation::Never {
+
+        // Compress requires some form of rotation
+        if config.file.compress && config.file.rotation == RotationStrategy::Never {
             return Err(LoggingError::InvalidRotation(
-                "combining max_bytes with time-based rotation is not yet supported".to_string(),
-            ));
-        }
-        if config.file.compress && config.file.rotation != Rotation::Never {
-            return Err(LoggingError::InvalidRotation(
-                "compression with time-based rotation is not yet supported".to_string(),
-            ));
-        }
-        if config.file.compress && config.file.max_bytes.is_none() {
-            return Err(LoggingError::InvalidRotation(
-                "compress requires max_bytes to be set (time-based rotation compression is not yet supported)"
+                "compress requires rotation to be enabled (set a rotation strategy other than never)"
                     .to_string(),
             ));
         }
@@ -63,12 +57,11 @@ pub(crate) fn init_logging(config: &LoggingConfig) -> Result<Option<WorkerGuard>
                 "retain_files must be at least 1".to_string(),
             ));
         }
-        if config.file.rotation == Rotation::Never
-            && config.file.max_bytes.is_none()
+        if config.file.rotation == RotationStrategy::Never
             && (config.file.retain_days.is_some() || config.file.retain_files.is_some())
         {
             return Err(LoggingError::InvalidRetention(
-                "retention policies have no effect with Rotation::Never".to_string(),
+                "retention policies require rotation to be enabled".to_string(),
             ));
         }
     }
@@ -175,38 +168,47 @@ fn build_file_layer(
 
     // Run startup retention cleanup (only for time-based rotation;
     // size-based rotation handles retention inline after each rotation)
-    let cleanup_errors = if config.max_bytes.is_none()
-        && config.rotation != Rotation::Never
-        && (config.retain_days.is_some() || config.retain_files.is_some())
-    {
-        retain::cleanup_old_logs(
-            &config.dir,
-            &config.prefix,
-            config.retain_days,
-            config.retain_files,
-        )
-    } else {
-        Vec::new()
+    let cleanup_errors = match &config.rotation {
+        RotationStrategy::Daily | RotationStrategy::Hourly => {
+            if config.retain_days.is_some() || config.retain_files.is_some() {
+                retain::cleanup_old_logs(
+                    &config.dir,
+                    &config.prefix,
+                    config.retain_days,
+                    config.retain_files,
+                )
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
     };
 
-    // Create writer: size-based or time-based
-    let (non_blocking, guard) = if let Some(max_bytes) = config.max_bytes {
-        let writer = SizeRotatingWriter::new(
-            config.dir.clone(),
-            config.prefix.clone(),
-            max_bytes,
-            config.compress,
-            config.retain_days,
-            config.retain_files,
-        )?;
-        tracing_appender::non_blocking(writer)
-    } else {
-        let appender = match config.rotation {
-            Rotation::Daily => tracing_appender::rolling::daily(&config.dir, &config.prefix),
-            Rotation::Hourly => tracing_appender::rolling::hourly(&config.dir, &config.prefix),
-            Rotation::Never => tracing_appender::rolling::never(&config.dir, &config.prefix),
-        };
-        tracing_appender::non_blocking(appender)
+    // Create writer based on rotation strategy
+    let (non_blocking, guard) = match &config.rotation {
+        RotationStrategy::SizeBased { max_bytes } => {
+            let writer = SizeRotatingWriter::new(
+                config.dir.clone(),
+                config.prefix.clone(),
+                *max_bytes,
+                config.compress,
+                config.retain_days,
+                config.retain_files,
+            )?;
+            tracing_appender::non_blocking(writer)
+        }
+        RotationStrategy::Daily => {
+            let appender = tracing_appender::rolling::daily(&config.dir, &config.prefix);
+            tracing_appender::non_blocking(appender)
+        }
+        RotationStrategy::Hourly => {
+            let appender = tracing_appender::rolling::hourly(&config.dir, &config.prefix);
+            tracing_appender::non_blocking(appender)
+        }
+        RotationStrategy::Never => {
+            let appender = tracing_appender::rolling::never(&config.dir, &config.prefix);
+            tracing_appender::non_blocking(appender)
+        }
     };
 
     // Build per-layer filter
@@ -274,7 +276,7 @@ mod tests {
         let mut modules = BTreeMap::new();
         modules.insert("sqlx".to_string(), "not_a_level!!!".to_string());
         let filter = build_env_filter("info", &modules);
-        assert!(filter.is_err());
+        assert!(matches!(filter, Err(LoggingError::InvalidFilter(_))));
     }
 
     #[test]
@@ -317,7 +319,7 @@ mod tests {
     fn retention_validation_never_rotation_with_retention() {
         let mut config = LoggingConfig::default();
         config.file.enabled = true;
-        config.file.rotation = Rotation::Never;
+        config.file.rotation = RotationStrategy::Never;
         config.file.retain_days = Some(7);
         let result = init_logging(&config);
         assert!(matches!(result, Err(LoggingError::InvalidRetention(_))));
@@ -333,8 +335,7 @@ mod tests {
             prefix: "test".to_string(),
             format: LogFormat::Json,
             filter: None,
-            rotation: Rotation::Daily,
-            max_bytes: None,
+            rotation: RotationStrategy::Daily,
             compress: false,
             retain_days: None,
             retain_files: None,
@@ -349,28 +350,7 @@ mod tests {
     fn rotation_validation_max_bytes_too_small() {
         let mut config = LoggingConfig::default();
         config.file.enabled = true;
-        config.file.rotation = Rotation::Never;
-        config.file.max_bytes = Some(100);
-        let result = init_logging(&config);
-        assert!(matches!(result, Err(LoggingError::InvalidRotation(_))));
-    }
-
-    #[test]
-    fn rotation_validation_max_bytes_with_daily() {
-        let mut config = LoggingConfig::default();
-        config.file.enabled = true;
-        config.file.max_bytes = Some(10_485_760);
-        config.file.rotation = Rotation::Daily;
-        let result = init_logging(&config);
-        assert!(matches!(result, Err(LoggingError::InvalidRotation(_))));
-    }
-
-    #[test]
-    fn rotation_validation_compress_with_hourly() {
-        let mut config = LoggingConfig::default();
-        config.file.enabled = true;
-        config.file.compress = true;
-        config.file.rotation = Rotation::Hourly;
+        config.file.rotation = RotationStrategy::SizeBased { max_bytes: 100 };
         let result = init_logging(&config);
         assert!(matches!(result, Err(LoggingError::InvalidRotation(_))));
     }
@@ -380,51 +360,53 @@ mod tests {
         let mut config = LoggingConfig::default();
         config.file.enabled = true;
         config.file.compress = true;
-        config.file.rotation = Rotation::Never;
-        // No max_bytes — compress has nothing to compress
+        config.file.rotation = RotationStrategy::Never;
         let result = init_logging(&config);
         assert!(matches!(result, Err(LoggingError::InvalidRotation(_))));
     }
 
     #[test]
-    fn rotation_validation_never_with_max_bytes_and_retain_files_allowed() {
+    fn rotation_validation_size_based_with_retain_files_allowed() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = LoggingConfig::default();
         config.file.enabled = true;
         config.file.dir = dir.path().to_path_buf();
-        config.file.rotation = Rotation::Never;
-        config.file.max_bytes = Some(10_485_760);
+        config.file.rotation = RotationStrategy::SizeBased {
+            max_bytes: 10_485_760,
+        };
         config.file.retain_files = Some(5);
         let result = init_logging(&config);
-        // Should succeed (not error) — max_bytes provides rotation
+        // Should succeed — SizeBased provides rotation
         assert_config_accepted(result);
     }
 
     #[test]
-    fn rotation_validation_never_with_max_bytes_and_retain_days_allowed() {
+    fn rotation_validation_size_based_with_retain_days_allowed() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = LoggingConfig::default();
         config.file.enabled = true;
         config.file.dir = dir.path().to_path_buf();
-        config.file.rotation = Rotation::Never;
-        config.file.max_bytes = Some(10_485_760);
+        config.file.rotation = RotationStrategy::SizeBased {
+            max_bytes: 10_485_760,
+        };
         config.file.retain_days = Some(7);
         let result = init_logging(&config);
-        // Should succeed — max_bytes provides rotation, retain_days works
+        // Should succeed — SizeBased provides rotation, retain_days works
         assert_config_accepted(result);
     }
 
     #[test]
-    fn rotation_validation_compress_with_max_bytes_allowed() {
+    fn rotation_validation_compress_with_size_based_allowed() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = LoggingConfig::default();
         config.file.enabled = true;
         config.file.dir = dir.path().to_path_buf();
-        config.file.rotation = Rotation::Never;
-        config.file.max_bytes = Some(10_485_760);
+        config.file.rotation = RotationStrategy::SizeBased {
+            max_bytes: 10_485_760,
+        };
         config.file.compress = true;
         let result = init_logging(&config);
-        // Should succeed — compress + max_bytes is the valid compression path
+        // Should succeed — compress + SizeBased is valid
         assert_config_accepted(result);
     }
 
@@ -434,8 +416,7 @@ mod tests {
         let mut config = LoggingConfig::default();
         config.file.enabled = true;
         config.file.dir = dir.path().to_path_buf();
-        config.file.rotation = Rotation::Never;
-        config.file.max_bytes = Some(4096);
+        config.file.rotation = RotationStrategy::SizeBased { max_bytes: 4096 };
         let result = init_logging(&config);
         assert_config_accepted(result);
     }
@@ -444,8 +425,7 @@ mod tests {
     fn rotation_validation_max_bytes_boundary_fail() {
         let mut config = LoggingConfig::default();
         config.file.enabled = true;
-        config.file.rotation = Rotation::Never;
-        config.file.max_bytes = Some(4095);
+        config.file.rotation = RotationStrategy::SizeBased { max_bytes: 4095 };
         let result = init_logging(&config);
         assert!(matches!(result, Err(LoggingError::InvalidRotation(_))));
     }
