@@ -281,8 +281,10 @@ mod tests {
 
     #[test]
     fn disabled_logging_returns_none() {
-        let mut config = LoggingConfig::default();
-        config.enabled = false;
+        let config = LoggingConfig {
+            enabled: false,
+            ..LoggingConfig::default()
+        };
         let result = init_logging(&config).unwrap();
         assert!(result.is_none());
     }
