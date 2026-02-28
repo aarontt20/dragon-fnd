@@ -461,8 +461,8 @@ mod tests {
 
     #[test]
     fn config_value_float_constructor() {
-        let v = ConfigValue::float(3.14);
-        assert_eq!(v, ConfigValue::Float(3.14));
+        let v = ConfigValue::float(2.21);
+        assert_eq!(v, ConfigValue::Float(2.21));
     }
 
     #[test]
@@ -508,8 +508,8 @@ mod tests {
         let tv = ConfigValue::boolean(true).into_toml_value().unwrap();
         assert_eq!(tv, Value::Boolean(true));
 
-        let tv = ConfigValue::float(3.14).into_toml_value().unwrap();
-        assert_eq!(tv, Value::Float(3.14));
+        let tv = ConfigValue::float(2.21).into_toml_value().unwrap();
+        assert_eq!(tv, Value::Float(2.21));
     }
 
     #[test]
