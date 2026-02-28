@@ -363,7 +363,7 @@ mod tests {
         assert_eq!(table["count"].as_integer(), Some(42));
     }
 
-    // --- Full Value Substitution (6 tests) ---
+    // --- Full Value Substitution (7 tests) ---
 
     #[test]
     fn pure_reference_preserves_integer() {
@@ -570,7 +570,7 @@ mod tests {
         assert_eq!(table["msg"].as_str(), Some("debug: true"));
     }
 
-    // --- Error Cases (12 tests) ---
+    // --- Error Cases (13 tests) ---
 
     #[test]
     fn circular_reference_detected() {

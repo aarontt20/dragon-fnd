@@ -46,6 +46,12 @@ pub enum ConfigError {
     #[error("env source separator must not be empty")]
     InvalidSeparator,
 
+    #[error("env source prefix must not be empty")]
+    InvalidPrefix,
+
+    #[error("invalid datetime string: {0}")]
+    InvalidDatetime(String),
+
     #[error("type conflict at '{path}': existing {existing} would be replaced by {incoming}")]
     TypeConflict {
         path: String,

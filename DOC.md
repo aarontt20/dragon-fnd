@@ -54,7 +54,7 @@ Library-owned value type for configuration data. Replaces `toml::Value` in the p
 - `integer(i: i64) -> Self`
 - `float(f: f64) -> Self`
 - `boolean(b: bool) -> Self`
-- `datetime(s: impl Into<String>) -> Self`
+- `datetime(s: impl Into<String>) -> Result<Self, ConfigError>` — validates the string is a valid TOML datetime
 
 ### `ConfigTable`
 
@@ -63,7 +63,12 @@ Newtype over `BTreeMap<String, ConfigValue>`.
 **Methods:**
 
 - `new() -> Self` — empty table
-- `insert(key: impl Into<String>, value: ConfigValue) -> &mut Self` — insert a key-value pair (chainable)
+- `insert(self, key: impl Into<String>, value: ConfigValue) -> Self` — insert a key-value pair (consuming builder pattern)
+- `get(key: &str) -> Option<&ConfigValue>` — look up a value by key
+- `iter() -> impl Iterator<Item = (&String, &ConfigValue)>` — iterate over entries
+- `len() -> usize` — number of entries
+- `is_empty() -> bool` — true if no entries
+- Implements `IntoIterator` for consuming iteration
 
 ### `ConfigEntry`
 
@@ -324,7 +329,7 @@ Values are coerced from strings to the most specific type:
 - `new(prefix: impl Into<String>, separator: impl Into<String>) -> Self` - Creates a new environment variable source.
   - `prefix` - The prefix that identifies relevant env vars (e.g., "MYAPP")
   - `separator` - The separator between path segments (e.g., "__"). Must not be empty.
-  - The constructor is infallible. An empty separator produces `ConfigError::InvalidSeparator` when `entries()` is called.
+  - The constructor is infallible. An empty prefix produces `ConfigError::InvalidPrefix` and an empty separator produces `ConfigError::InvalidSeparator` when `entries()` is called.
 
 ### `coerce_value` (private)
 
@@ -345,7 +350,7 @@ Use `$$` to produce a literal `$` in any string.
 
 ### Resolution Algorithm
 
-Resolution uses a graph-based approach with three phases:
+Resolution uses a graph-based approach with four phases:
 
 1. **Collection** - Walk the config tree and collect all `${...}` references
    as `(source_path, target_path)` pairs
@@ -356,6 +361,9 @@ Resolution uses a graph-based approach with three phases:
 
 3. **Resolution** - Process references in topological order. Each reference
    is resolved exactly once, with its dependencies guaranteed to be resolved.
+
+4. **Escape Processing** - Strings containing `$$` but no `${...}` references
+   have their `$$` sequences replaced with literal `$`.
 
 This approach is O(n) compared to iterative resolution which could be O(n × depth).
 
@@ -405,6 +413,8 @@ Variants:
 - `NonScalarReference(String)` - Cannot reference non-scalar value
 - `UnclosedReference` - Unclosed reference (missing `}`)
 - `InvalidSeparator` - EnvSource separator is empty
+- `InvalidPrefix` - EnvSource prefix is empty
+- `InvalidDatetime(String)` - Invalid datetime string passed to `ConfigValue::datetime()`
 - `TypeConflict { path, existing, incoming }` - Non-table value at intermediate path would be replaced by table
 - `EmptyPathSegment { var }` - Environment variable produces empty path segment (consecutive separators)
 

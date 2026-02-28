@@ -18,6 +18,9 @@ impl EnvSource {
 
 impl ConfigSource for EnvSource {
     fn entries(&self) -> Result<Vec<ConfigEntry>, ConfigError> {
+        if self.prefix.is_empty() {
+            return Err(ConfigError::InvalidPrefix);
+        }
         if self.separator.is_empty() {
             return Err(ConfigError::InvalidSeparator);
         }
@@ -268,6 +271,14 @@ mod tests {
         let err = source.entries().unwrap_err();
 
         assert!(matches!(err, ConfigError::InvalidSeparator));
+    }
+
+    #[test]
+    fn env_source_empty_prefix_returns_error() {
+        let source = EnvSource::new("", "__");
+        let err = source.entries().unwrap_err();
+
+        assert!(matches!(err, ConfigError::InvalidPrefix));
     }
 
     #[test]

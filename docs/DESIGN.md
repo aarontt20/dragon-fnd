@@ -23,7 +23,7 @@ src/
 │   ├── file.rs            # FileSource: loads TOML files
 │   ├── env.rs             # EnvSource: loads environment variables
 │   ├── resolve.rs         # Graph-based ${path.to.field} variable resolution
-│   └── error.rs           # ConfigError enum (13 variants)
+│   └── error.rs           # ConfigError enum (15 variants)
 ├── logging/               # Feature: "logging"
 │   ├── mod.rs             # Re-exports, pub(crate) init_logging
 │   ├── config.rs          # LoggingConfig, ConsoleConfig, FileConfig, LogFormat, RotationStrategy (serde, private fields)
@@ -64,8 +64,8 @@ pub struct ConfigEntry {
 `ConfigValue` is the library-owned value type that replaces `toml::Value` in the public API. Variants: `String`, `Integer(i64)`, `Float(f64)`, `Boolean(bool)`, `Datetime(String)`, `Array(Vec<ConfigValue>)`, `Table(ConfigTable)`. `ConfigTable` is a newtype over `BTreeMap<String, ConfigValue>`. Conversion to `toml::Value` happens at a single boundary inside `ConfigBuilder::build()`.
 
 Two constructors serve different use cases:
-- `ConfigEntry::root(table)` — empty path, for sources that produce a complete table (files)
-- `ConfigEntry::at_path(path, value)` — specific path segments, for sources that produce individual values (env vars)
+- `ConfigEntry::root(table)` — `pub(crate)`, empty path, for internal sources that produce a complete `toml::Table` (files)
+- `ConfigEntry::at_path(path, value)` — public, specific path segments, for sources that produce individual `ConfigValue` entries (env vars, custom sources)
 
 `merge_at_path()` returns `Result<(), ConfigError>` and handles all merge scenarios with a `let-else` pattern for the empty-path case:
 1. **Empty path + table value**: deep merge at root level — nested tables merge recursively, non-table values return `ConfigError::RootNotTable`
@@ -87,7 +87,7 @@ Two constructors serve different use cases:
 
 `src/config/env.rs` — loads configuration from environment variables. Configured with a `prefix` and `separator`.
 
-The constructor is infallible — validation is deferred to `entries()`, consistent with how `FileSource` validates at `entries()` time. An empty separator produces `ConfigError::InvalidSeparator`.
+The constructor is infallible — validation is deferred to `entries()`, consistent with how `FileSource` validates at `entries()` time. An empty prefix produces `ConfigError::InvalidPrefix`; an empty separator produces `ConfigError::InvalidSeparator`.
 
 Scanning logic:
 1. For each env var, check if the key starts with `{prefix}{separator}`
@@ -215,8 +215,8 @@ Key design decisions:
 | Variant | Meaning |
 |---------|---------|
 | `InvalidFilter(String)` | Malformed EnvFilter directive |
-| `InvalidRotation(String)` | Invalid rotation config (max_bytes too small, combining max_bytes with time rotation, compress without rotation) |
-| `InvalidRetention(String)` | Invalid retention config (mutual exclusion, zero values, Never without max_bytes + retention) |
+| `InvalidRotation(String)` | Invalid rotation config (max_bytes too small, compress without rotation) |
+| `InvalidRetention(String)` | Invalid retention config (mutual exclusion, zero values, retention without rotation) |
 | `FileSetupFailed { dir, source }` | Could not create log directory (display shows path only; `source` available via `std::error::Error::source()`) |
 | `SubscriberAlreadySet` | Global tracing subscriber already set — logging configuration was not applied |
 
@@ -226,7 +226,7 @@ Key design decisions:
 
 ### ConfigError
 
-`src/config/error.rs` — 13 variants, `#[non_exhaustive]`:
+`src/config/error.rs` — 15 variants, `#[non_exhaustive]`:
 
 | Variant | Meaning |
 |---------|---------|
@@ -241,6 +241,8 @@ Key design decisions:
 | `NonScalarReference(String)` | Embedded reference targets a table or array |
 | `UnclosedReference` | Missing closing `}` in `${...}` |
 | `InvalidSeparator` | EnvSource separator is empty |
+| `InvalidPrefix` | EnvSource prefix is empty |
+| `InvalidDatetime(String)` | Invalid datetime string passed to `ConfigValue::datetime()` or present in `ConfigValue::Datetime` variant during conversion |
 | `TypeConflict { path, existing, incoming }` | Non-table value at intermediate path would be replaced by table (e.g., scalar `server` when env var sets `server.port`) |
 | `EmptyPathSegment { var }` | Environment variable produces empty path segment (consecutive separators) |
 

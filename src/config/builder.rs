@@ -38,7 +38,7 @@ impl ConfigBuilder {
         for source in self.sources {
             let entries = source.entries()?;
             for entry in entries {
-                merge_at_path(&mut merged, &entry.path, entry.value.into())?;
+                merge_at_path(&mut merged, &entry.path, entry.value.into_toml_value()?)?;
             }
         }
 

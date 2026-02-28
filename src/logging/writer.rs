@@ -236,11 +236,16 @@ fn compress_file(path: &Path) -> io::Result<()> {
 
     if let Err(e) = &result {
         // Clean up partial .gz file so it doesn't occupy a retention slot
-        let _ = fs::remove_file(&gz_path);
-        return Err(io::Error::other(format!(
-            "compression failed for '{}': {e}",
-            path.display()
-        )));
+        let mut msg = format!("compression failed for '{}': {e}", path.display());
+        if let Err(cleanup_err) = fs::remove_file(&gz_path) {
+            if cleanup_err.kind() != io::ErrorKind::NotFound {
+                msg.push_str(&format!(
+                    "; failed to remove partial gz file '{}': {cleanup_err}",
+                    gz_path.display()
+                ));
+            }
+        }
+        return Err(io::Error::other(msg));
     }
 
     // Delete original; silently ignore NotFound (retention may have already removed it)

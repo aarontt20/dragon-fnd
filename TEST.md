@@ -2,12 +2,12 @@
 
 Tests are inline (`#[cfg(test)]` modules in source files) plus integration tests in `tests/`.
 
-**Without logging feature: 79 unit tests + 18 integration tests + 2 doc-tests = 99 tests**
-**With logging feature: 133 unit tests + 28 integration tests + 2 doc-tests = 163 tests**
+**Without logging feature: 81 unit tests + 18 integration tests + 2 doc-tests = 101 tests**
+**With logging feature: 135 unit tests + 28 integration tests + 2 doc-tests = 165 tests**
 
 ---
 
-## Module: `config::source` (25 tests)
+## Module: `config::source` (27 tests)
 
 Tests for `merge_at_path()`, `ConfigEntry` constructors, `ConfigValue`/`ConfigTable` types, and value conversions.
 
@@ -40,10 +40,11 @@ Tests for `merge_at_path()`, `ConfigEntry` constructors, `ConfigValue`/`ConfigTa
 | `config_value_integer_constructor` | Integer constructor | `ConfigValue::integer(42)` creates `Integer` variant |
 | `config_value_float_constructor` | Float constructor | `ConfigValue::float(3.14)` creates `Float` variant |
 | `config_value_boolean_constructor` | Boolean constructor | `ConfigValue::boolean(true)` creates `Boolean` variant |
-| `config_value_datetime_constructor` | Datetime constructor | `ConfigValue::datetime("2024-01-01T00:00:00Z")` creates `Datetime` variant |
+| `config_value_datetime_constructor` | Datetime constructor | `ConfigValue::datetime("2024-01-01T00:00:00Z")` returns `Ok(Datetime)` variant |
+| `config_value_datetime_constructor_rejects_invalid` | Datetime validation | `ConfigValue::datetime("not-a-datetime")` returns `Err(InvalidDatetime)` |
 | `config_table_new_and_insert` | Table constructor | `ConfigTable::new()` + `insert()` builds tables with chaining |
 | `config_value_datetime_round_trip` | Datetime conversion | Valid datetime string survives `ConfigValue → toml::Value → ConfigValue` round-trip |
-| `config_value_datetime_invalid_falls_back_to_string` | Datetime fallback | Invalid datetime string converts to `toml::Value::String` (not panic) |
+| `config_value_datetime_invalid_returns_error` | Datetime rejection | Invalid datetime string returns `ConfigError::InvalidDatetime` from both constructor and `into_toml_value()` |
 
 ### `ConfigValue ↔ toml::Value` conversion
 
@@ -75,7 +76,7 @@ Tests for `FileSource` TOML file loading.
 
 ---
 
-## Module: `config::env` (14 tests)
+## Module: `config::env` (15 tests)
 
 Tests for `EnvSource` environment variable loading and `coerce_value()` type coercion.
 
@@ -101,6 +102,7 @@ Tests for `EnvSource` environment variable loading and `coerce_value()` type coe
 | `env_source_empty_path_ignored` | Empty path skip | `PREFIX__` (no path after separator) is silently ignored |
 | `env_source_custom_separator` | Separator config | Custom separator (e.g., `_` instead of `__`) works correctly |
 | `env_source_empty_separator_returns_error` | Validation | Empty separator returns `ConfigError::InvalidSeparator` from `entries()` |
+| `env_source_empty_prefix_returns_error` | Validation | Empty prefix returns `ConfigError::InvalidPrefix` from `entries()` |
 | `env_source_empty_segment_error` | Empty segment | Consecutive separators (e.g., `APP__A____B`) return `ConfigError::EmptyPathSegment` |
 
 ### Test Helpers

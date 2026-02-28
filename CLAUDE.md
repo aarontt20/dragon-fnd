@@ -7,14 +7,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `docs/DESIGN.md` — How the built system works (architecture, current state)
 - `docs/VISION.md` — Where the project is going (planned subsystems, design philosophy)
 - `DOC.md` — API documentation
-- `TEST.md` — Test coverage documentation (133 unit + 28 integration + 2 doc-tests with logging feature)
+- `TEST.md` — Test coverage documentation (135 unit + 28 integration + 2 doc-tests with logging feature)
 
 ## Build Commands
 
 ```bash
 cargo build              # Build the library
-cargo test               # Run all tests (79 unit + 18 integration + 2 doc-tests)
-cargo test --features logging  # Run all tests including logging (133 unit + 28 integration + 2 doc-tests)
+cargo test               # Run all tests (81 unit + 18 integration + 2 doc-tests)
+cargo test --features logging  # Run all tests including logging (135 unit + 28 integration + 2 doc-tests)
 cargo test resolve       # Run tests matching "resolve"
 cargo clippy             # Run linter
 cargo doc --open         # Generate and view documentation
@@ -40,7 +40,7 @@ src/
 │   └── error.rs        # ConfigError enum
 ├── logging/            # Feature: "logging"
 │   ├── mod.rs          # Re-exports, pub(crate) init_logging
-│   ├── config.rs       # LoggingConfig, ConsoleConfig, FileConfig, RotationStrategy (serde types, private fields)
+│   ├── config.rs       # LoggingConfig, ConsoleConfig, FileConfig, LogFormat, RotationStrategy (serde types, private fields)
 │   ├── builder.rs      # LoggingBuilder, ConsoleBuilder, FileBuilder (fluent API)
 │   ├── error.rs        # LoggingError enum
 │   ├── init.rs         # Subscriber initialization, validation
@@ -60,7 +60,7 @@ src/
 **ConfigValue** (`src/config/source.rs`):
 - Library-owned value type replacing `toml::Value` in the public API
 - Variants: `String`, `Integer`, `Float`, `Boolean`, `Datetime`, `Array`, `Table(ConfigTable)`
-- `ConfigTable` is a newtype over `BTreeMap<String, ConfigValue>` with `new()` and `insert()`
+- `ConfigTable` is a newtype over `BTreeMap<String, ConfigValue>` with `new()`, `insert()`, `get()`, `iter()`, `len()`, `is_empty()`, and `IntoIterator`
 - Converted to `toml::Value` at the single merge boundary in `ConfigBuilder::build()`
 
 **ConfigEntry**:

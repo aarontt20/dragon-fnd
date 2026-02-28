@@ -42,8 +42,11 @@ impl ConfigValue {
         Self::Boolean(b)
     }
 
-    pub fn datetime(s: impl Into<String>) -> Self {
-        Self::Datetime(s.into())
+    pub fn datetime(s: impl Into<String>) -> Result<Self, ConfigError> {
+        let s = s.into();
+        s.parse::<toml::value::Datetime>()
+            .map(|_| Self::Datetime(s.clone()))
+            .map_err(|_| ConfigError::InvalidDatetime(s))
     }
 }
 
@@ -56,6 +59,22 @@ impl ConfigTable {
         self.0.insert(key.into(), value);
         self
     }
+
+    pub fn get(&self, key: &str) -> Option<&ConfigValue> {
+        self.0.get(key)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &ConfigValue)> {
+        self.0.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 impl Default for ConfigTable {
@@ -64,32 +83,41 @@ impl Default for ConfigTable {
     }
 }
 
-impl From<ConfigValue> for Value {
-    fn from(cv: ConfigValue) -> Self {
-        match cv {
-            ConfigValue::String(s) => Value::String(s),
-            ConfigValue::Integer(i) => Value::Integer(i),
-            ConfigValue::Float(f) => Value::Float(f),
-            ConfigValue::Boolean(b) => Value::Boolean(b),
-            ConfigValue::Datetime(s) => {
-                // Parse the string as a TOML datetime. If parsing fails (e.g., the
-                // user passed a non-datetime string to ConfigValue::datetime()), fall
-                // back to Value::String. This is acceptable because the conversion is
-                // internal — the resulting toml::Value feeds into merge/resolve, not
-                // back to the user. Invalid datetime strings surface as type errors
-                // during final deserialization.
-                s.parse::<toml::value::Datetime>()
-                    .map(Value::Datetime)
-                    .unwrap_or_else(|_| Value::String(s))
-            }
-            ConfigValue::Array(arr) => {
-                Value::Array(arr.into_iter().map(Value::from).collect())
-            }
-            ConfigValue::Table(table) => {
-                Value::Table(
-                    table.0.into_iter().map(|(k, v)| (k, Value::from(v))).collect(),
-                )
-            }
+impl IntoIterator for ConfigTable {
+    type Item = (String, ConfigValue);
+    type IntoIter = std::collections::btree_map::IntoIter<String, ConfigValue>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl ConfigValue {
+    /// Convert to the internal `toml::Value` representation.
+    ///
+    /// This is `pub(crate)` because external consumers should not need `toml::Value` —
+    /// `ConfigValue` exists precisely to avoid that dependency.
+    pub(crate) fn into_toml_value(self) -> Result<Value, ConfigError> {
+        match self {
+            ConfigValue::String(s) => Ok(Value::String(s)),
+            ConfigValue::Integer(i) => Ok(Value::Integer(i)),
+            ConfigValue::Float(f) => Ok(Value::Float(f)),
+            ConfigValue::Boolean(b) => Ok(Value::Boolean(b)),
+            ConfigValue::Datetime(s) => s
+                .parse::<toml::value::Datetime>()
+                .map(Value::Datetime)
+                .map_err(|_| ConfigError::InvalidDatetime(s)),
+            ConfigValue::Array(arr) => arr
+                .into_iter()
+                .map(|v| v.into_toml_value())
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::Array),
+            ConfigValue::Table(table) => table
+                .0
+                .into_iter()
+                .map(|(k, v)| v.into_toml_value().map(|v| (k, v)))
+                .collect::<Result<Table, _>>()
+                .map(Value::Table),
         }
     }
 }
@@ -121,7 +149,7 @@ pub struct ConfigEntry {
 }
 
 impl ConfigEntry {
-    pub fn root(table: Table) -> Self {
+    pub(crate) fn root(table: Table) -> Self {
         Self {
             path: Vec::new(),
             value: Value::Table(table).into(),
@@ -191,8 +219,15 @@ pub fn merge_at_path(table: &mut Table, path: &[String], value: Value) -> Result
                 other => other,
             })?;
         }
-        // Preceding match ensures a Table exists at `first` (either pre-existing or freshly inserted)
-        _ => unreachable!("expected table at {first:?} after intermediate-key check"),
+        // Preceding match ensures a Table exists at `first` (either pre-existing or freshly inserted).
+        // This branch should never execute, but return an error instead of panicking.
+        _ => {
+            return Err(ConfigError::TypeConflict {
+                path: first.clone(),
+                existing: "unknown".to_string(),
+                incoming: "table".to_string(),
+            });
+        }
     }
 
     Ok(())
@@ -438,8 +473,14 @@ mod tests {
 
     #[test]
     fn config_value_datetime_constructor() {
-        let v = ConfigValue::datetime("2026-01-15T10:30:00");
+        let v = ConfigValue::datetime("2026-01-15T10:30:00").unwrap();
         assert_eq!(v, ConfigValue::Datetime("2026-01-15T10:30:00".to_string()));
+    }
+
+    #[test]
+    fn config_value_datetime_constructor_rejects_invalid() {
+        let err = ConfigValue::datetime("not-a-datetime").unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidDatetime(_)));
     }
 
     #[test]
@@ -447,9 +488,9 @@ mod tests {
         let table = ConfigTable::new()
             .insert("host", ConfigValue::string("localhost"))
             .insert("port", ConfigValue::integer(8080));
-        assert_eq!(table.0.len(), 2);
+        assert_eq!(table.len(), 2);
         assert_eq!(
-            table.0.get("host"),
+            table.get("host"),
             Some(&ConfigValue::String("localhost".to_string()))
         );
     }
@@ -458,20 +499,16 @@ mod tests {
 
     #[test]
     fn config_value_to_toml_value_scalars() {
-        let cv = ConfigValue::string("hello");
-        let tv: Value = cv.into();
+        let tv = ConfigValue::string("hello").into_toml_value().unwrap();
         assert_eq!(tv, Value::String("hello".into()));
 
-        let cv = ConfigValue::integer(42);
-        let tv: Value = cv.into();
+        let tv = ConfigValue::integer(42).into_toml_value().unwrap();
         assert_eq!(tv, Value::Integer(42));
 
-        let cv = ConfigValue::boolean(true);
-        let tv: Value = cv.into();
+        let tv = ConfigValue::boolean(true).into_toml_value().unwrap();
         assert_eq!(tv, Value::Boolean(true));
 
-        let cv = ConfigValue::float(3.14);
-        let tv: Value = cv.into();
+        let tv = ConfigValue::float(3.14).into_toml_value().unwrap();
         assert_eq!(tv, Value::Float(3.14));
     }
 
@@ -480,7 +517,7 @@ mod tests {
         let cv = ConfigValue::Table(
             ConfigTable::new().insert("key", ConfigValue::string("val")),
         );
-        let tv: Value = cv.into();
+        let tv = cv.into_toml_value().unwrap();
         assert!(tv.is_table());
         assert_eq!(tv["key"].as_str(), Some("val"));
     }
@@ -491,7 +528,7 @@ mod tests {
             ConfigValue::integer(1),
             ConfigValue::integer(2),
         ]);
-        let tv: Value = cv.into();
+        let tv = cv.into_toml_value().unwrap();
         assert!(tv.is_array());
         assert_eq!(tv.as_array().unwrap().len(), 2);
     }
@@ -532,8 +569,8 @@ mod tests {
     #[test]
     fn config_value_datetime_round_trip() {
         // Valid TOML datetime parses successfully
-        let cv = ConfigValue::datetime("2026-01-15T10:30:00");
-        let tv: Value = cv.into();
+        let cv = ConfigValue::datetime("2026-01-15T10:30:00").unwrap();
+        let tv = cv.into_toml_value().unwrap();
         assert!(tv.is_datetime(), "valid datetime string should parse to Value::Datetime");
 
         // Round-trip back preserves as Datetime variant
@@ -545,11 +582,15 @@ mod tests {
     }
 
     #[test]
-    fn config_value_datetime_invalid_falls_back_to_string() {
-        let cv = ConfigValue::datetime("not-a-datetime");
-        let tv: Value = cv.into();
-        // Invalid datetime falls back to Value::String
-        assert_eq!(tv, Value::String("not-a-datetime".into()));
+    fn config_value_datetime_invalid_returns_error() {
+        // Constructor rejects invalid datetime
+        let err = ConfigValue::datetime("not-a-datetime").unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidDatetime(_)));
+
+        // Direct enum construction also errors during conversion
+        let cv = ConfigValue::Datetime("not-a-datetime".to_string());
+        let err = cv.into_toml_value().unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidDatetime(_)));
     }
 
     #[test]
@@ -561,9 +602,9 @@ mod tests {
 
         let cv: ConfigValue = Value::Table(outer).into();
         match cv {
-            ConfigValue::Table(t) => match t.0.get("nested") {
+            ConfigValue::Table(t) => match t.get("nested") {
                 Some(ConfigValue::Table(inner)) => {
-                    assert_eq!(inner.0.get("a"), Some(&ConfigValue::Integer(1)));
+                    assert_eq!(inner.get("a"), Some(&ConfigValue::Integer(1)));
                 }
                 other => panic!("expected nested table, got {other:?}"),
             },
