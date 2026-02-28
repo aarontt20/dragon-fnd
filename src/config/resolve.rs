@@ -100,6 +100,11 @@ fn parse_references(s: &str) -> Result<Vec<ConfigPath>, ConfigError> {
                     chars.next();
                     let path = consume_until(&mut chars, '}')
                         .ok_or(ConfigError::UnclosedReference)?;
+                    if path.is_empty() {
+                        return Err(ConfigError::InvalidReferencePath(
+                            "${} (empty reference)".to_string(),
+                        ));
+                    }
                     refs.push(path.split('.').map(String::from).collect());
                 }
                 _ => {}
@@ -713,6 +718,15 @@ mod tests {
     fn invalid_path_empty_segment() {
         let mut table = table_from_toml(r#"
             a = "${x..y}"
+        "#);
+        let err = resolve_references(&mut table).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidReferencePath(_)));
+    }
+
+    #[test]
+    fn empty_reference_rejected() {
+        let mut table = table_from_toml(r#"
+            a = "${}"
         "#);
         let err = resolve_references(&mut table).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidReferencePath(_)));
