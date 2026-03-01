@@ -341,6 +341,52 @@ Checks if a string looks like an integer (optional minus followed by digits).
 
 ---
 
+## Module: `config::serde_source`
+
+Struct-to-config adapter.
+
+### `SerdeSource`
+
+A `ConfigSource` that serializes any `T: Serialize` into the config pipeline. Most commonly used to feed parsed CLI arguments into `ConfigBuilder`, but works with any serializable struct.
+
+`Option::None` fields are omitted from the resulting table, so they do not override values from lower-priority sources. For maximum robustness, annotate Option fields with `#[serde(skip_serializing_if = "Option::is_none")]`.
+
+```rust
+use dragon_fnd::{ConfigBuilder, SerdeSource};
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize)]
+struct Args {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verbose: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct MyConfig {
+    port: u16,
+    verbose: bool,
+}
+
+let args = Args { port: Some(9090), verbose: None };
+
+let config: MyConfig = ConfigBuilder::new()
+    .with_file("config/default.toml", true)
+    .with_source(SerdeSource::new(&args)?)  // registered last = highest priority
+    .build()?;
+```
+
+**Methods:**
+
+- `new<T: Serialize>(value: &T) -> Result<Self, ConfigError>` - Serializes `value` into a TOML table at construction time. Takes `&T` so the caller retains ownership. Returns `Err(ConfigError::SerializeError)` if the value cannot be represented as a TOML table (e.g., bare scalars, `u64` exceeding `i64::MAX`).
+
+**Limitations:**
+
+Values take a roundtrip through TOML's type system. Types that cannot be represented as a TOML table produce `ConfigError::SerializeError`. Serde field names in the serialized output must match the TOML keys they are intended to override — `#[serde(rename)]` changes the serialized key.
+
+---
+
 ## Module: `config::resolve`
 
 Variable reference resolution for configuration values.
@@ -406,6 +452,7 @@ Variants:
 - `ReadError { path, source }` - Failed to read config file
 - `ParseError { path, source }` - Failed to parse config file (manually constructed with file path context)
 - `DeserializeError(toml::de::Error)` - Failed to deserialize config (no `#[from]`)
+- `SerializeError(toml::ser::Error)` - Failed to serialize value to TOML table (no `#[from]`)
 - `RootNotTable(String)` - Root-level config entry must be a table
 - `CircularReference(Vec<String>)` - Circular reference detected, with cycle path
 - `ReferenceNotFound(String)` - Referenced path not found

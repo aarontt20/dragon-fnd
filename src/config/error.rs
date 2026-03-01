@@ -25,6 +25,9 @@ pub enum ConfigError {
     #[error("failed to deserialize config: {0}")]
     DeserializeError(toml::de::Error),
 
+    #[error("failed to serialize value to config: {0}")]
+    SerializeError(toml::ser::Error),
+
     #[error("root-level config entry must be a table, got {0}")]
     RootNotTable(String),
 

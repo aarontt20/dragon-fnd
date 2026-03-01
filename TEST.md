@@ -2,8 +2,8 @@
 
 Tests are inline (`#[cfg(test)]` modules in source files) plus integration tests in `tests/`.
 
-**Without logging feature: 81 unit tests + 18 integration tests + 2 doc-tests = 101 tests**
-**With logging feature: 135 unit tests + 28 integration tests + 2 doc-tests = 165 tests**
+**Without logging feature: 95 unit tests + 25 integration tests + 3 doc-tests = 123 tests**
+**With logging feature: 149 unit tests + 35 integration tests + 3 doc-tests = 187 tests**
 
 ---
 
@@ -109,6 +109,45 @@ Tests for `EnvSource` environment variable loading and `coerce_value()` type coe
 
 - `EnvGuard`: RAII helper that sets env vars and removes them on drop to prevent test pollution
 - All env-mutating tests use `#[serial]` from `serial_test` to prevent data races
+
+---
+
+## Module: `config::serde_source` (14 tests)
+
+Tests for `SerdeSource` — serializing `T: Serialize` structs into the config pipeline.
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `basic_struct` | Happy path | Simple struct serializes correctly, table contains expected keys/values |
+| `nested_struct` | Nested structs | Nested structs map to nested TOML tables |
+| `none_fields_omitted` | None omission | `Option::None` fields absent from table (regression guard for toml crate behavior) |
+| `some_fields_present` | Some values | `Option::Some(v)` fields present with unwrapped value |
+| `mixed_none_and_some` | Mixed options | Only Some values appear in output; None values absent |
+| `all_none_nested` | All-None inner struct | Inner struct with all-None produces empty sub-table |
+| `empty_struct` | Empty struct | Struct with no fields produces empty table (no-op merge) |
+| `vec_fields` | Vec fields | `Vec<T>` fields serialize as TOML arrays |
+| `non_struct_errors` | Non-struct rejection | Bare scalar/vec returns `ConfigError::SerializeError` |
+| `u64_overflow_errors` | u64 overflow | `u64::MAX` returns `ConfigError::SerializeError` (TOML integers are i64) |
+| `enum_with_data_serializes_as_nested_table` | Enum with data | Externally-tagged enum with data serializes as nested tables |
+| `unit_enum_variants` | Unit enums | Unit enum variants serialize as strings |
+| `nested_option_some_none_omitted` | Nested option | `Option<Option<T>>` with `Some(None)` is omitted (UnsupportedNone catch handles nested Options) |
+| `entries_returns_single_root` | ConfigSource impl | Exactly one entry with empty path returned |
+
+---
+
+## Integration Tests: `config_serde_source` (7 tests)
+
+End-to-end tests for `SerdeSource` through the full config pipeline (`tests/config_serde_source.rs`).
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `serde_source_standalone` | Standalone | SerdeSource as sole source through full pipeline |
+| `file_then_serde_override` | File + override | File defaults + SerdeSource overrides; None fields keep file values |
+| `serde_source_with_nested_structs` | Nested deep merge | Nested structs deep-merge correctly against file; None fields in inner structs preserve file values |
+| `serde_source_with_variable_references` | Pipeline sanity | Existing `${...}` resolution works when SerdeSource participates in source stack |
+| `serde_source_serialize_error` | Error at new() | Non-struct type produces `ConfigError::SerializeError` at `new()`, before `build()` |
+| `three_way_merge` | Multi-layer | Three source layers merge correctly with registration-order priority |
+| `serde_source_with_vec_fields` | Vec roundtrip | Vec fields survive the full `T → toml::Table → merge → T'` roundtrip |
 
 ---
 
@@ -360,12 +399,13 @@ Tests for the type-state `AppContext` builder and extension slot (`tests/context
 
 ---
 
-## Doc-Tests (2 tests)
+## Doc-Tests (3 tests)
 
 | Test | Coverage | Behavior Verified |
 |------|----------|-------------------|
 | `AppContext` usage example | `no_run` compile check | Usage example compiles correctly |
 | `AppContext` compile_fail | Type-state enforcement | `AppContext::builder().build_sync()` without `with_config()` does not compile |
+| `SerdeSource` priority example | `no_run` compile check | Usage example with multi-source priority compiles correctly |
 
 ---
 
@@ -377,6 +417,7 @@ Tests for the type-state `AppContext` builder and extension slot (`tests/context
 - `coerce_value()` - all type coercion branches
 - `EnvSource::entries()` - prefix matching, path parsing, edge cases, validation
 - `resolve_references()` - comprehensive coverage including all error variants, type preservation, chaining
+- `SerdeSource` - struct serialization, None omission, nested structs, enums, Vec fields, error cases, full pipeline roundtrip
 - `ConfigBuilder` - file loading, source ordering, custom sources, cross-source references, error propagation
 - `AppContext` - type-state builder, fallible `build_sync()`, compile-time enforcement, extension slot (store, retrieve, override, ordering, debug)
 - `LoggingConfig` - defaults, round-trip, all format/rotation variants, retention fields, per-layer filters

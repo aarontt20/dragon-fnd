@@ -26,7 +26,7 @@ Each subsystem lives behind its own feature flag. You only pay for what you use 
 | Subsystem | Feature | Depends On | Status |
 |-----------|---------|------------|--------|
 | Config | *(always on)* | — | Built |
-| CLI Args | `cli` | Config | Planned |
+| CLI Args (`SerdeSource`) | *(always on)* | Config | Built |
 | Logging | `logging` | Config | Built |
 | SQLite | `sqlite` | Config | Planned |
 | FS Storage | `fs` | Config | Planned |
@@ -131,27 +131,25 @@ Note: `with_logging()` is available on all builder states (before or after `with
 
 ---
 
-## CLI Args Subsystem
+## CLI Args — Built as `SerdeSource`
 
-**Feature:** `cli`
+**Always-on** (no feature gate — uses only `serde` + `toml`, both already always-on deps)
 
-The library does not own argument parsing. It does not depend on clap. It does not call `parse()`. It does not define what arguments look like.
+Landed as `SerdeSource` rather than the originally planned `ClapSource` behind a `cli` feature flag. The adapter is more general than CLI args — it accepts any `T: Serialize` — and adds zero new dependencies, making a feature gate unnecessary friction.
 
-What it does: provide a `ConfigSource` adapter that makes it trivial to feed parsed CLI arguments into the config layer. The user parses args however they want (clap, pico-args, manual parsing, whatever), then wraps the result:
+The library does not own argument parsing. It does not depend on clap. It does not call `parse()`. It does not define what arguments look like. `SerdeSource::new(&value)?` serializes the struct to a `toml::Table` at construction time. `Option::None` fields are omitted, preserving lower-priority values from files and env vars.
 
 ```rust
 let args = Args::parse();  // user's code, user's parser
 
-let config: MyConfig = Config::builder()
+let config: MyConfig = ConfigBuilder::new()
     .with_file("config/default.toml", true)
     .with_env("MYAPP", "__")
-    .with_source(ClapSource::new(args))  // args become just another config source
+    .with_source(SerdeSource::new(&args)?)  // args become just another config source
     .build()?;
 ```
 
-`ClapSource` (or whatever the adapter is called) serializes the args struct to TOML values and produces `ConfigEntry` items — the same interface as `FileSource` and `EnvSource`. `Option::None` fields do not produce entries, preserving lower-priority values from files and env vars.
-
-The key insight: CLI args are not special. They are just another config source with highest priority. The library provides the adapter; the user provides the parser and the types.
+The key insight remains: CLI args are not special. They are just another config source with highest priority. The library provides the adapter; the user provides the parser and the types. See [DESIGN.md](DESIGN.md) for implementation details.
 
 ---
 

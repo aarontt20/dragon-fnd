@@ -7,14 +7,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `docs/DESIGN.md` — How the built system works (architecture, current state)
 - `docs/VISION.md` — Where the project is going (planned subsystems, design philosophy)
 - `DOC.md` — API documentation
-- `TEST.md` — Test coverage documentation (135 unit + 28 integration + 2 doc-tests with logging feature)
+- `TEST.md` — Test coverage documentation (149 unit + 35 integration + 3 doc-tests with logging feature)
 
 ## Build Commands
 
 ```bash
 cargo build              # Build the library
-cargo test               # Run all tests (81 unit + 18 integration + 2 doc-tests)
-cargo test --features logging  # Run all tests including logging (135 unit + 28 integration + 2 doc-tests)
+cargo test               # Run all tests (95 unit + 25 integration + 3 doc-tests)
+cargo test --features logging  # Run all tests including logging (149 unit + 35 integration + 3 doc-tests)
 cargo test resolve       # Run tests matching "resolve"
 cargo clippy             # Run linter
 cargo doc --open         # Generate and view documentation
@@ -31,11 +31,12 @@ src/
 ├── lib.rs              # Crate root, re-exports public API
 ├── error.rs            # Top-level Error enum
 ├── config/
-│   ├── mod.rs          # Public exports: ConfigBuilder, ConfigError, ConfigSource, ConfigEntry, ConfigValue, ConfigTable
+│   ├── mod.rs          # Public exports: ConfigBuilder, ConfigError, ConfigSource, ConfigEntry, ConfigValue, ConfigTable, SerdeSource
 │   ├── source.rs       # Core abstractions: ConfigSource trait, ConfigEntry, ConfigValue, ConfigTable, merge_at_path
 │   ├── builder.rs      # ConfigBuilder orchestrating sources
 │   ├── file.rs         # FileSource: loads TOML files
 │   ├── env.rs          # EnvSource: loads environment variables
+│   ├── serde_source.rs # SerdeSource: serializes any Serialize type into config
 │   ├── resolve.rs      # Variable reference resolution (${path.to.field})
 │   └── error.rs        # ConfigError enum
 ├── logging/            # Feature: "logging"

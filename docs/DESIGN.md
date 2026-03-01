@@ -17,13 +17,14 @@ src/
 ├── lib.rs                 # Crate root, re-exports public API
 ├── error.rs               # Top-level Error enum (2 variants)
 ├── config/
-│   ├── mod.rs             # Public exports: ConfigBuilder, ConfigError, ConfigSource, ConfigEntry, ConfigValue, ConfigTable
+│   ├── mod.rs             # Public exports: ConfigBuilder, ConfigError, ConfigSource, ConfigEntry, ConfigValue, ConfigTable, SerdeSource
 │   ├── source.rs          # ConfigSource trait, ConfigEntry, ConfigValue, ConfigTable, merge_at_path, deep_merge
 │   ├── builder.rs         # ConfigBuilder: fluent API, generic build::<T>()
 │   ├── file.rs            # FileSource: loads TOML files
 │   ├── env.rs             # EnvSource: loads environment variables
+│   ├── serde_source.rs    # SerdeSource: serializes any Serialize type into config
 │   ├── resolve.rs         # Graph-based ${path.to.field} variable resolution
-│   └── error.rs           # ConfigError enum (15 variants)
+│   └── error.rs           # ConfigError enum (16 variants)
 ├── logging/               # Feature: "logging"
 │   ├── mod.rs             # Re-exports, pub(crate) init_logging
 │   ├── config.rs          # LoggingConfig, ConsoleConfig, FileConfig, LogFormat, RotationStrategy (serde, private fields)
@@ -36,7 +37,7 @@ src/
     └── mod.rs             # AppContext<C> with type-state AppContextBuilder, extension slot
 ```
 
-17 source files. Tests are inline (`#[cfg(test)]` modules) plus integration tests in `tests/`.
+18 source files. Tests are inline (`#[cfg(test)]` modules) plus integration tests in `tests/`.
 
 ---
 
@@ -102,6 +103,16 @@ Value coercion applies in order:
 2. **Integer** — optional leading `-` followed by ASCII digits only (no scientific notation, no hex, no leading zeros)
 3. **Float** — must contain `.` and parse as `f64`
 4. **String** — fallback for everything else
+
+### SerdeSource
+
+`src/config/serde_source.rs` — serializes any `T: Serialize` into the config pipeline. Most commonly used to feed parsed CLI arguments into `ConfigBuilder`, but works with any serializable struct.
+
+- `SerdeSource::new(&value)?` serializes eagerly via `toml::Table::try_from()` at construction time, unlike `FileSource` and `EnvSource` which validate at `entries()` time. This is intentional — the input is available immediately, so errors are reported at the call site where the user created the source.
+- Produces a single `ConfigEntry::root(table)` — the same pattern as `FileSource`.
+- `Option::None` fields are omitted from the table, so they do not override values from lower-priority sources. This relies on the `toml` crate's handling of `UnsupportedNone` during serialization.
+- Types that cannot be represented as a TOML table (bare scalars, bare arrays, `u64` exceeding `i64::MAX`) produce `ConfigError::SerializeError`.
+- Always-on (no feature gate) — uses only `serde` + `toml`, both already always-on dependencies.
 
 ### ConfigBuilder
 
@@ -226,7 +237,7 @@ Key design decisions:
 
 ### ConfigError
 
-`src/config/error.rs` — 15 variants, `#[non_exhaustive]`:
+`src/config/error.rs` — 16 variants, `#[non_exhaustive]`:
 
 | Variant | Meaning |
 |---------|---------|
@@ -234,6 +245,7 @@ Key design decisions:
 | `ReadError { path, source }` | I/O failure reading a file |
 | `ParseError { path, source }` | Invalid TOML syntax (manually constructed with file path context) |
 | `DeserializeError(toml::de::Error)` | Final deserialization into target type failed (no `#[from]` — explicit `map_err` at call sites) |
+| `SerializeError(toml::ser::Error)` | Value cannot be serialized to TOML table (no `#[from]` — matches `DeserializeError` pattern) |
 | `RootNotTable(String)` | Root-level `ConfigEntry` has non-table value (e.g., integer at empty path) |
 | `CircularReference(Vec<String>)` | Cycle detected in variable reference graph, with dotted-path chain (e.g., `a.b -> c.d -> a.b`) |
 | `ReferenceNotFound(String)` | `${path}` points to a nonexistent key |
