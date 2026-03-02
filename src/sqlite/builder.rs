@@ -2,12 +2,22 @@ use std::path::PathBuf;
 
 use super::config::{JournalMode, SqliteConfig};
 
+/// Fluent builder for SQLite pool configuration.
+///
+/// This is what [`AppContextBuilder::with_sqlite()`](crate::context::AppContextBuilder) accepts.
+/// Use [`SqliteBuilder::new()`] for programmatic construction, or
+/// [`SqliteBuilder::from_config()`] to bridge from a deserialized [`SqliteConfig`].
+#[derive(Debug, Clone)]
 #[must_use = "builders do nothing until passed to AppContextBuilder::with_sqlite()"]
 pub struct SqliteBuilder {
     config: SqliteConfig,
 }
 
 impl SqliteBuilder {
+    /// Creates a new builder with the given database path and sensible defaults.
+    ///
+    /// Use `":memory:"` for an in-memory database. For file-based databases,
+    /// the parent directory is created automatically at init time.
     pub fn new(path: impl Into<String>) -> Self {
         Self {
             config: SqliteConfig {
@@ -17,50 +27,62 @@ impl SqliteBuilder {
         }
     }
 
+    /// Creates a builder from a deserialized [`SqliteConfig`].
+    ///
+    /// Bridges TOML configuration into the builder API.
     pub fn from_config(config: SqliteConfig) -> Self {
         Self { config }
     }
 
+    /// Enables or disables running migrations at pool init time.
     pub fn migrate(mut self, enable: bool) -> Self {
         self.config.migrate = enable;
         self
     }
 
+    /// Sets the directory containing SQL migration files.
     pub fn migrations_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.config.migrations_dir = dir.into();
         self
     }
 
+    /// Sets the maximum number of connections in the pool (default: 5, must be >= 1).
     pub fn max_connections(mut self, n: u32) -> Self {
         self.config.max_connections = n;
         self
     }
 
+    /// Sets the minimum number of idle connections maintained by the pool (default: 1).
     pub fn min_connections(mut self, n: u32) -> Self {
         self.config.min_connections = n;
         self
     }
 
+    /// Sets how long to wait for a connection from the pool before failing (default: 10s).
     pub fn acquire_timeout_secs(mut self, secs: u64) -> Self {
         self.config.acquire_timeout_secs = secs;
         self
     }
 
+    /// Sets how long an idle connection is kept before being closed (default: 300s).
     pub fn idle_timeout_secs(mut self, secs: u64) -> Self {
         self.config.idle_timeout_secs = secs;
         self
     }
 
+    /// Sets the SQLite journal mode (default: [`JournalMode::Wal`]).
     pub fn journal_mode(mut self, mode: JournalMode) -> Self {
         self.config.journal_mode = mode;
         self
     }
 
+    /// Enables or disables foreign key enforcement (default: true).
     pub fn foreign_keys(mut self, enable: bool) -> Self {
         self.config.foreign_keys = enable;
         self
     }
 
+    /// Sets how long SQLite waits when the database is locked (default: 5s).
     pub fn busy_timeout_secs(mut self, secs: u64) -> Self {
         self.config.busy_timeout_secs = secs;
         self

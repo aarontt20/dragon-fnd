@@ -71,7 +71,6 @@ pub struct AppContext<C> {
     config: C,
     extensions: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
     #[cfg(feature = "sqlite")]
-    #[allow(dead_code)]
     sqlite_pool: Option<sqlx::SqlitePool>,
     #[cfg(feature = "logging")]
     #[allow(dead_code)] // held for Drop — flushes pending log writes
@@ -229,7 +228,6 @@ impl<Cfg> AppContextBuilder<Cfg, SyncBuild> {
             extensions: self.extensions,
             #[cfg(feature = "logging")]
             logging: self.logging,
-            #[cfg(feature = "sqlite")]
             sqlite: self.sqlite,
         }
     }

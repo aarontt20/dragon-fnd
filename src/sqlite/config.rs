@@ -1,6 +1,15 @@
 use serde::Deserialize;
 use std::path::PathBuf;
 
+/// SQLite database configuration, deserialized from the `[sqlite]` section.
+///
+/// All fields have serde defaults via `#[serde(default)]`. The `path` field
+/// must be set before use — an empty path produces [`SqliteError::EmptyPath`](super::SqliteError::EmptyPath)
+/// at init time.
+///
+/// Fields are `pub(crate)` — use [`SqliteBuilder`](super::SqliteBuilder) for
+/// programmatic construction or deserialize from TOML via
+/// [`SqliteBuilder::from_config()`](super::SqliteBuilder::from_config).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct SqliteConfig {
@@ -33,11 +42,20 @@ impl Default for SqliteConfig {
     }
 }
 
+/// SQLite journal mode, controlling how transactions are written to disk.
+///
+/// Deserialized from lowercase strings: `"wal"`, `"delete"`, `"memory"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum JournalMode {
+    /// Write-Ahead Logging — best for concurrent read/write workloads.
+    /// Requires a file-based database; unsupported for `:memory:` (overridden
+    /// to `Memory` with a warning).
     Wal,
+    /// Classic rollback journal — deletes the journal after each transaction.
     Delete,
+    /// In-memory journal — no disk I/O for journal. Appropriate for
+    /// `:memory:` databases or when durability is not needed.
     Memory,
 }
 

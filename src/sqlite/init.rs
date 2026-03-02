@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -8,26 +9,46 @@ use super::config::{JournalMode, SqliteConfig};
 use super::error::SqliteError;
 
 pub(crate) async fn init_pool(config: &SqliteConfig) -> Result<SqlitePool, SqliteError> {
-    // 1. Validate path
+    // 1. Validate config
     if config.path.is_empty() {
         return Err(SqliteError::EmptyPath);
+    }
+    if config.max_connections == 0 {
+        return Err(SqliteError::InvalidConfig {
+            field: "max_connections",
+            reason: "must be at least 1".into(),
+        });
+    }
+    if config.min_connections > config.max_connections {
+        return Err(SqliteError::InvalidConfig {
+            field: "min_connections",
+            reason: format!(
+                "min_connections ({}) cannot exceed max_connections ({})",
+                config.min_connections, config.max_connections
+            ),
+        });
     }
 
     let is_memory = config.path == ":memory:";
 
-    // 2. Warn if WAL + :memory:
-    if config.journal_mode == JournalMode::Wal && is_memory {
+    // 2. Override WAL → Memory for in-memory databases
+    //    WAL is unsupported for :memory: — SQLite silently falls back to memory
+    //    journal mode. Override explicitly so the actual mode matches the warning.
+    let effective_journal_mode = if config.journal_mode == JournalMode::Wal && is_memory {
         #[cfg(feature = "logging")]
         tracing::warn!(
             "journal_mode is set to WAL but database is in-memory — \
-             SQLite will silently fall back to memory journal mode"
+             overriding to memory journal mode"
         );
         #[cfg(not(feature = "logging"))]
         eprintln!(
             "warning: journal_mode is set to WAL but database is in-memory — \
-             SQLite will silently fall back to memory journal mode"
+             overriding to memory journal mode"
         );
-    }
+        JournalMode::Memory
+    } else {
+        config.journal_mode
+    };
 
     // 3. Create parent directory for file-based databases
     if !is_memory {
@@ -45,15 +66,25 @@ pub(crate) async fn init_pool(config: &SqliteConfig) -> Result<SqlitePool, Sqlit
     }
 
     // 4. Build connection options
-    let journal_mode = match config.journal_mode {
+    let journal_mode = match effective_journal_mode {
         JournalMode::Wal => SqliteJournalMode::Wal,
         JournalMode::Delete => SqliteJournalMode::Delete,
         JournalMode::Memory => SqliteJournalMode::Memory,
     };
 
-    let connect_options = SqliteConnectOptions::from_str(&format!("sqlite:{}", config.path))
-        .map_err(|source| SqliteError::PoolCreationFailed { source })?
-        .create_if_missing(true)
+    // Use from_str for :memory: because sqlx gives it special treatment
+    // (setting the in_memory flag for correct pool behavior). Use filename()
+    // for file paths to avoid URL encoding issues with special characters.
+    let base_options = if is_memory {
+        SqliteConnectOptions::from_str("sqlite::memory:")
+            .map_err(|source| SqliteError::PoolCreationFailed { source })?
+    } else {
+        SqliteConnectOptions::new()
+            .filename(Path::new(&config.path))
+            .create_if_missing(true)
+    };
+
+    let connect_options = base_options
         .journal_mode(journal_mode)
         .foreign_keys(config.foreign_keys)
         .busy_timeout(Duration::from_secs(config.busy_timeout_secs));
@@ -125,6 +156,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn zero_max_connections_rejected() {
+        let config = SqliteConfig {
+            path: ":memory:".into(),
+            max_connections: 0,
+            journal_mode: JournalMode::Memory,
+            ..SqliteConfig::default()
+        };
+        let err = init_pool(&config).await.unwrap_err();
+        assert!(matches!(err, SqliteError::InvalidConfig { field: "max_connections", .. }));
+    }
+
+    #[tokio::test]
+    async fn min_exceeds_max_connections_rejected() {
+        let config = SqliteConfig {
+            path: ":memory:".into(),
+            min_connections: 10,
+            max_connections: 5,
+            journal_mode: JournalMode::Memory,
+            ..SqliteConfig::default()
+        };
+        let err = init_pool(&config).await.unwrap_err();
+        assert!(matches!(err, SqliteError::InvalidConfig { field: "min_connections", .. }));
+    }
+
+    #[tokio::test]
     async fn foreign_keys_enabled() {
         let config = SqliteConfig {
             path: ":memory:".into(),
@@ -183,6 +239,23 @@ mod tests {
         };
         let err = init_pool(&config).await.unwrap_err();
         assert!(matches!(err, SqliteError::MigrationsDirNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn wal_with_memory_overrides_to_memory_journal() {
+        // WAL is unsupported for in-memory databases — init_pool overrides
+        // to memory journal mode with a warning.
+        let config = SqliteConfig {
+            path: ":memory:".into(),
+            journal_mode: JournalMode::Wal,
+            ..SqliteConfig::default()
+        };
+        let pool = init_pool(&config).await.unwrap();
+        let row: (String,) = sqlx::query_as("PRAGMA journal_mode")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(row.0, "memory");
     }
 
     #[tokio::test]

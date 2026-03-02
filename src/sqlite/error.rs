@@ -2,11 +2,23 @@ use std::io;
 use std::path::PathBuf;
 use thiserror::Error;
 
+/// Errors that can occur during SQLite pool initialization and migration.
+///
+/// All variants carry enough context to identify the failure without
+/// inspecting the source chain. Inner `sqlx` errors use `#[source]` (not
+/// `#[from]`) since multiple variants wrap the same type with different
+/// semantic meanings.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum SqliteError {
     #[error("database path cannot be empty")]
     EmptyPath,
+
+    #[error("invalid sqlite configuration: {field} — {reason}")]
+    InvalidConfig {
+        field: &'static str,
+        reason: String,
+    },
 
     #[error("failed to create database directory '{}'", dir.display())]
     DirectoryCreationFailed {
@@ -46,6 +58,19 @@ mod tests {
     fn empty_path_display() {
         let err = SqliteError::EmptyPath;
         assert_eq!(err.to_string(), "database path cannot be empty");
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn invalid_config_display() {
+        let err = SqliteError::InvalidConfig {
+            field: "max_connections",
+            reason: "must be at least 1".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "invalid sqlite configuration: max_connections — must be at least 1"
+        );
         assert!(err.source().is_none());
     }
 

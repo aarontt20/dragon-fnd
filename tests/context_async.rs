@@ -39,13 +39,7 @@ async fn sqlite_before_config() {
 }
 
 #[tokio::test]
-async fn async_build_without_sqlite() {
-    // Even in AsyncBuild, not registering sqlite should yield None
-    // (This test requires another async subsystem to enter AsyncBuild,
-    // but we only have sqlite right now. So we test via sqlite feature
-    // being enabled but build() without with_sqlite().)
-    // Actually, build() is only on AsyncBuild which requires with_sqlite().
-    // So this test verifies the sqlite_pool is Some when registered.
+async fn registered_sqlite_pool_is_some() {
     let ctx = AppContext::builder()
         .with_sqlite(SqliteBuilder::new(":memory:").journal_mode(JournalMode::Memory))
         .with_config(())

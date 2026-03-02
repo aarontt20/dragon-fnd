@@ -99,7 +99,7 @@ These are not just bugs to fix — they are design constraints for the rewrite. 
 
 Two compile-time dimensions:
 
-**1. Async requirement.** The builder tracks whether any registered subsystem needs an async runtime. Enabling `sqlite` or `http` transitions the builder to a `RequiresAsync` state. `build_sync()` is only available when no async subsystem is registered. `build()` (async) is always available. This is enforced by the type system — calling `build_sync()` on a builder with database enabled does not compile.
+**1. Async requirement.** The builder tracks whether any registered subsystem needs an async runtime. Enabling `sqlite` or `http` transitions the builder to an `AsyncBuild` state. `build_sync()` is only available when no async subsystem is registered. `build()` (async) is always available. This is enforced by the type system — calling `build_sync()` on a builder with database enabled does not compile.
 
 **2. Subsystem availability.** The built `AppContext` should expose accessors only for subsystems that were registered. If you didn't register a database, `ctx.database()` should not exist on the type — not panic, not return `Option`, but literally not be a method. Whether this is achievable via trait bounds, associated types, or a pragmatic `Option`-based fallback is an open design question to be resolved when the second subsystem lands.
 
