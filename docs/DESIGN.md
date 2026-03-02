@@ -6,7 +6,7 @@ This document describes dragon-fnd as it exists in code today. For future plans 
 
 ## What It Does
 
-dragon-fnd is a foundation library for Rust applications that provides typed configuration loading from multiple sources (TOML files, environment variables, custom sources) with deep merge semantics, graph-based variable reference resolution, and a type-state application context builder. It ships as a single crate with feature-gated subsystems — currently config (always on) and logging (`logging` feature). The library does not own `main()` and does not prescribe application structure.
+dragon-fnd is a foundation library for Rust applications that provides typed configuration loading from multiple sources (TOML files, environment variables, custom sources) with deep merge semantics, graph-based variable reference resolution, and a type-state application context builder. It ships as a single crate with feature-gated subsystems — currently config (always on), logging (`logging` feature), and SQLite database (`sqlite` feature). The library does not own `main()` and does not prescribe application structure.
 
 ---
 
@@ -15,7 +15,7 @@ dragon-fnd is a foundation library for Rust applications that provides typed con
 ```
 src/
 ├── lib.rs                 # Crate root, re-exports public API
-├── error.rs               # Top-level Error enum (2 variants)
+├── error.rs               # Top-level Error enum (3 variants)
 ├── config/
 │   ├── mod.rs             # Public exports: ConfigBuilder, ConfigError, ConfigSource, ConfigEntry, ConfigValue, ConfigTable, SerdeSource
 │   ├── source.rs          # ConfigSource trait, ConfigEntry, ConfigValue, ConfigTable, merge_at_path, deep_merge
@@ -33,11 +33,17 @@ src/
 │   ├── init.rs            # Subscriber initialization, layer composition, validation
 │   ├── retain.rs          # Retention cleanup: delete old rotated log files
 │   └── writer.rs          # SizeRotatingWriter: size-based rotation with compression
+├── sqlite/                # Feature: "sqlite"
+│   ├── mod.rs             # Re-exports, pub(crate) init_pool, pub use SqlitePool
+│   ├── config.rs          # SqliteConfig, JournalMode (serde, private fields)
+│   ├── builder.rs         # SqliteBuilder (fluent API)
+│   ├── error.rs           # SqliteError enum (6 variants)
+│   └── init.rs            # Pool creation, connectivity test, migrations
 └── context/
     └── mod.rs             # AppContext<C> with type-state AppContextBuilder, extension slot
 ```
 
-18 source files. Tests are inline (`#[cfg(test)]` modules) plus integration tests in `tests/`.
+23 source files. Tests are inline (`#[cfg(test)]` modules) plus integration tests in `tests/`.
 
 ---
 
@@ -233,6 +239,63 @@ Key design decisions:
 
 ---
 
+## SQLite System
+
+**Feature:** `sqlite` — opt-in via `Cargo.toml`.
+
+Database pool initialization and lifecycle via `sqlx`. The subsystem reads config (database path, pool sizing, PRAGMAs), creates the connection pool, tests connectivity, and optionally runs filesystem-based migrations. SQLite is the first async subsystem — enabling it transitions the builder to `AsyncBuild`, making `build_sync()` unavailable at compile time.
+
+### Architecture Decision: No Trait Boundary
+
+The SQLite subsystem does not define its own trait. Unlike `tracing` (which provides a genuine ecosystem-wide interface), `sqlx` is a concrete implementation, not a trait boundary. There is no useful database abstraction in the Rust ecosystem that sqlx implements and others could substitute. This is the second explicit exception to CLAUDE.md Constraint 4, justified differently from logging: `tracing` IS the interface; `sqlx` is merely the default implementation. Users who want a custom pool (rusqlite, diesel, SurrealDB) skip the `sqlite` feature and use `with_extension()`.
+
+### Config Types (`src/sqlite/config.rs`)
+
+Serde-deserializable types for TOML configuration:
+
+- `SqliteConfig` — `path`, `max_connections` (default 5), `min_connections` (default 1), `acquire_timeout_secs` (default 10), `idle_timeout_secs` (default 300), `migrate` (default false), `migrations_dir` (default `./migrations`), `journal_mode` (default `Wal`), `foreign_keys` (default true), `busy_timeout_secs` (default 5). All fields are `pub(crate)` — accessed through `SqliteBuilder`, not direct field mutation. Uses `#[serde(default)]` and an explicit `Default` impl.
+- `JournalMode` — `Wal` | `Delete` | `Memory`. Deserialized via `#[serde(rename_all = "lowercase")]`.
+
+### Builder Type (`src/sqlite/builder.rs`)
+
+`SqliteBuilder` wraps `SqliteConfig` — no field duplication:
+
+- `#[must_use]` attribute — warns if the builder is created but not used
+- `new(path: impl Into<String>)` — quick setup with defaults. No `Default` impl — `path` is required and has no sensible default
+- `from_config(SqliteConfig)` — bridge from deserialized TOML
+- Fluent setters: `migrate()`, `migrations_dir()`, `max_connections()`, `min_connections()`, `acquire_timeout_secs()`, `idle_timeout_secs()`, `journal_mode()`, `foreign_keys()`, `busy_timeout_secs()`
+- `into_config()` is `pub(crate)` — consumed by `build()`
+
+### Pool Initialization (`src/sqlite/init.rs`)
+
+`init_pool(&SqliteConfig) -> Result<SqlitePool, SqliteError>`
+
+Seven-step initialization sequence:
+1. **Validate path** — empty path returns `SqliteError::EmptyPath`
+2. **Warn WAL + `:memory:`** — WAL journal mode is unsupported for in-memory databases; SQLite silently falls back. Per Constraint 2 (no silent failures), a warning is logged
+3. **Create parent directory** — for file-based databases (not `:memory:`)
+4. **Build `SqliteConnectOptions`** — `.journal_mode()`, `.foreign_keys()`, `.busy_timeout()` set via options so they apply per-connection, not just the first connection in the pool
+5. **Create pool** — `SqlitePoolOptions::new().connect_with(options).await`
+6. **Test connectivity** — `SELECT 1` immediately, not deferred to first query
+7. **Run migrations** — if `config.migrate` is true, uses `sqlx::migrate::Migrator::new(path)` for filesystem-based migrations. Missing directory returns `SqliteError::MigrationsDirNotFound`
+
+### Error Types (`src/sqlite/error.rs`)
+
+`SqliteError` — 6 variants, `#[non_exhaustive]`:
+
+| Variant | Meaning |
+|---------|---------|
+| `EmptyPath` | Database path is empty string |
+| `DirectoryCreationFailed { dir, source }` | Could not create parent directory for database file |
+| `PoolCreationFailed { source }` | sqlx pool creation or connection options failed |
+| `ConnectivityTestFailed { source }` | `SELECT 1` test query failed |
+| `MigrationsDirNotFound(PathBuf)` | `migrate = true` but directory does not exist |
+| `MigrationFailed { source }` | Migration execution failed |
+
+All `sqlx::Error` inner sources use `#[source]`, not `#[from]` — each variant wraps `sqlx::Error` with a different semantic meaning, so conversion is explicit in `init_pool`.
+
+---
+
 ## Error Types
 
 ### ConfigError
@@ -260,12 +323,13 @@ Key design decisions:
 
 ### Top-level Error
 
-`src/error.rs` — 2 variants, `#[non_exhaustive]`:
+`src/error.rs` — 3 variants, `#[non_exhaustive]`:
 
 | Variant | Meaning |
 |---------|---------|
 | `Config(ConfigError)` | Wraps any config error (with `#[from]` for `?` conversion) |
 | `Logging(LoggingError)` | Wraps any logging error (cfg-gated behind `logging` feature) |
+| `Sqlite(SqliteError)` | Wraps any sqlite error (cfg-gated behind `sqlite` feature) |
 
 ---
 
@@ -275,14 +339,17 @@ Key design decisions:
 
 ```rust
 pub struct AppContext<C> {
-    config: C,
-    extensions: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
+    // Fields ordered for correct drop sequence (Rust drops in declaration order):
+    config: C,                            // 1. pure data, no cleanup
+    extensions: HashMap<...>,             // 2. user-provided, drop before subsystems
+    #[cfg(feature = "sqlite")]
+    sqlite_pool: Option<SqlitePool>,      // 3. close database connections
     #[cfg(feature = "logging")]
-    log_guard: Option<WorkerGuard>,  // LAST field — drops last
+    log_guard: Option<WorkerGuard>,       // 4. LAST — flushes pending log writes
 }
 ```
 
-`AppContext::config()` returns `&C` — zero-cost after build. `extension::<T>()` returns `Option<&T>` — looks up a type-keyed value registered via `with_extension()` on the builder. The `extensions` field is declared before `log_guard` so extensions drop before the logging guard flushes. The `log_guard` is held for its `Drop` implementation — when the context is dropped, the guard flushes pending log writes. It is the last struct field so it outlives all other subsystem handles during drop (Rust drops fields in declaration order).
+`AppContext::config()` returns `&C` — zero-cost after build. `extension::<T>()` returns `Option<&T>` — looks up a type-keyed value registered via `with_extension()` on the builder. `sqlite()` returns `Option<&SqlitePool>` — `None` when `with_sqlite()` was not called. Fields are ordered for correct drop sequence: extensions drop before subsystem handles, `sqlite_pool` drops before `log_guard` (so database shutdown logging is captured), and `log_guard` is last so it flushes pending writes after everything else drops.
 
 ### Type-State Builder
 
@@ -295,6 +362,8 @@ pub struct AppContextBuilder<Cfg, Async = SyncBuild> {
     extensions: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
     #[cfg(feature = "logging")]
     logging: Option<LoggingBuilder>,
+    #[cfg(feature = "sqlite")]
+    sqlite: Option<SqliteBuilder>,
 }
 ```
 
@@ -305,19 +374,24 @@ Two type-level dimensions:
 - `.with_config(config)` transitions to `AppContextBuilder<Configured<C>, A>` (preserving the async parameter)
 - `build_sync()` only exists on `Configured<C>` — calling it without config is a compile error
 
-**Async requirements** — `SyncBuild` (only marker defined currently):
-- `build_sync()` only exists on `SyncBuild` — future async subsystems will transition to `AsyncBuild`, removing `build_sync()` and requiring `build().await` instead
+**Async requirements** — `SyncBuild` vs `AsyncBuild`:
+- `build_sync()` only exists on `SyncBuild`
+- `with_sqlite()` transitions from `SyncBuild` to `AsyncBuild`, removing `build_sync()` and requiring `build().await` instead
+- If already in `AsyncBuild` (from another async subsystem), `with_sqlite()` stays in `AsyncBuild`
 - `PhantomData<Async>` reserves the parameter with no layout cost
+- `AsyncBuild` is cfg-gated behind `#[cfg(feature = "sqlite")]` — it only exists when at least one async subsystem feature is enabled
 
-`build_sync()` returns `Result<AppContext<C>, Error>`. Even with no subsystems registered, the signature is fallible — future subsystems also need it, and feature-flag-dependent signatures are confusing.
+**SyncBuild → AsyncBuild transition** — `into_async()` is a private helper that centralizes field propagation during state transitions. Without it, every new async subsystem's `with_*()` method on `SyncBuild` would need to manually copy every field from every other subsystem — O(N×M) boilerplate. With `into_async()`, new subsystems add one field to this method instead of editing every other subsystem's transition.
 
-**Subsystem registration** — `with_logging(LoggingBuilder)` and `with_extension(T: Send + Sync + 'static)` are available on all builder states (`NoConfig` and `Configured<C>`) via generic `impl<Cfg, A>` blocks. This lets users register subsystems and extensions before or after providing config. Fields are propagated through state transitions (`builder()` → `with_config()` → `build_sync()`). Extensions use a type-map (`HashMap<TypeId, Box<dyn Any + Send + Sync>>`) — if the same type is registered twice, the last value wins.
+`build_sync()` returns `Result<AppContext<C>, Error>`. `build()` (async) also returns `Result<AppContext<C>, Error>`. Even with no subsystems registered, the signature is fallible — subsystems can fail to initialize, and feature-flag-dependent signatures are confusing. `build()` initializes subsystems in dependency order: logging first (so other subsystems can log during init), then database.
 
-Marker types (`NoConfig`, `Configured<C>`, `SyncBuild`) are `pub` with `#[doc(hidden)]` — nameable for compiler error messages, hidden from generated docs. Standard Rust ecosystem convention for type-state markers.
+**Subsystem registration** — `with_logging(LoggingBuilder)`, `with_sqlite(SqliteBuilder)`, and `with_extension(T: Send + Sync + 'static)` are available on all builder states (`NoConfig` and `Configured<C>`) via generic `impl<Cfg, A>` blocks. This lets users register subsystems and extensions before or after providing config. Fields are propagated through state transitions (`builder()` → `with_config()` → `build_sync()` / `build()`). Extensions use a type-map (`HashMap<TypeId, Box<dyn Any + Send + Sync>>`) — if the same type is registered twice, the last value wins.
 
-`AppContext` uses a manual `Debug` impl rather than `#[derive(Debug)]` — `WorkerGuard` does not implement `Debug`, so the derive would break. The `log_guard` field is rendered as `"<WorkerGuard>"` in Debug output. `AppContextBuilder` also uses a manual Debug impl that shows whether logging is configured.
+Marker types (`NoConfig`, `Configured<C>`, `SyncBuild`, `AsyncBuild`) are `pub` with `#[doc(hidden)]` — nameable for compiler error messages, hidden from generated docs. Standard Rust ecosystem convention for type-state markers.
 
-A `compile_fail` doc-test verifies that `AppContext::builder().build_sync()` does not compile (no config provided).
+`AppContext` uses a manual `Debug` impl rather than `#[derive(Debug)]` — `WorkerGuard` does not implement `Debug`, so the derive would break. The `log_guard` field is rendered as `"<WorkerGuard>"` in Debug output; `sqlite_pool` renders as `true`/`false`. `AppContextBuilder` also uses a manual Debug impl that shows whether logging and sqlite are configured.
+
+Two `compile_fail` doc-tests verify type-state enforcement: (1) `AppContext::builder().build_sync()` does not compile without config, and (2) `with_sqlite().build_sync()` does not compile (must use `build().await`).
 
 ### Teardown Contract
 
@@ -342,10 +416,11 @@ Three always-on crates, plus optional crates behind feature flags:
 | `tracing-appender` | 0.2 | Non-blocking file appender with rotation | `logging` |
 | `flate2` | 1 | Gzip compression for rotated log files | `logging` |
 | `time` | 0.3 (formatting, macros, std) | UTC timestamps for rotated filenames | `logging` |
+| `sqlx` | 0.8 (sqlite, runtime-tokio) | SQLite database pool and migrations | `sqlite` |
 
-Dev dependencies: `tempfile` (filesystem tests), `serial_test` (env-var test serialization), `toml` (integration tests for private-field configs).
+Dev dependencies: `tempfile` (filesystem tests), `serial_test` (env-var test serialization), `toml` (integration tests for private-field configs), `tokio` (async test runtime for `#[tokio::test]`).
 
-No async runtime. No CLI parser.
+No CLI parser. Async runtime (`tokio`) is a dev dependency only — library code uses `async`/`.await` language features; `sqlx`'s `runtime-tokio` feature brings in tokio transitively when the `sqlite` feature is enabled.
 
 ---
 

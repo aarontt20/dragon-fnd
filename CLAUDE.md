@@ -7,14 +7,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `docs/DESIGN.md` — How the built system works (architecture, current state)
 - `docs/VISION.md` — Where the project is going (planned subsystems, design philosophy)
 - `DOC.md` — API documentation
-- `TEST.md` — Test coverage documentation (149 unit + 35 integration + 3 doc-tests with logging feature)
+- `TEST.md` — Test coverage documentation (175 unit + 50 integration + 4 doc-tests with all features)
 
 ## Build Commands
 
 ```bash
 cargo build              # Build the library
-cargo test               # Run all tests (95 unit + 25 integration + 3 doc-tests)
-cargo test --features logging  # Run all tests including logging (149 unit + 35 integration + 3 doc-tests)
+cargo test               # Run all tests (95 unit + 25 integration + 4 doc-tests)
+cargo test --features logging  # Run all tests including logging (149 unit + 35 integration + 4 doc-tests)
+cargo test --features sqlite   # Run all tests including sqlite (121 unit + 40 integration + 4 doc-tests)
+cargo test --features sqlite,logging  # Run all tests (175 unit + 50 integration + 4 doc-tests)
 cargo test resolve       # Run tests matching "resolve"
 cargo clippy             # Run linter
 cargo doc --open         # Generate and view documentation
@@ -47,6 +49,12 @@ src/
 │   ├── init.rs         # Subscriber initialization, validation
 │   ├── retain.rs       # Retention cleanup for rotated log files
 │   └── writer.rs       # SizeRotatingWriter with compression
+├── sqlite/             # Feature: "sqlite"
+│   ├── mod.rs          # Re-exports, pub(crate) init_pool, pub use SqlitePool
+│   ├── config.rs       # SqliteConfig, JournalMode (serde types, private fields)
+│   ├── builder.rs      # SqliteBuilder (fluent API)
+│   ├── error.rs        # SqliteError enum
+│   └── init.rs         # Pool creation, connectivity test, migrations
 └── context/
     └── mod.rs          # AppContext with type-state AppContextBuilder, extension slot
 ```
@@ -80,7 +88,7 @@ src/
 
 3. **Deserialization at build time**: Config is parsed once into the target type `T`, making subsequent access zero-cost
 
-4. **Error hierarchy**: `ConfigError` for config-specific errors, `LoggingError` for logging errors, both wrapped by top-level `Error`
+4. **Error hierarchy**: `ConfigError` for config-specific errors, `LoggingError` for logging errors, `SqliteError` for sqlite errors, all wrapped by top-level `Error`
 
 5. **Type-state AppContext builder**: `build_sync()` only exists when config is provided — compile-time enforcement, no runtime `MissingConfig` errors. Returns `Result` since subsystems can fail to initialize.
 
@@ -130,7 +138,7 @@ These are hard constraints learned from the previous attempt. Do not violate the
 1. **No panicking in library code.** Every accessor returns `Result` or `Option`. The old version had `ctx.database()` that panicked if the subsystem wasn't enabled — this was the single most criticized design flaw.
 2. **No silent failures.** Every error must be surfaced. Missing config files, malformed references, failed path navigation — all must produce explicit errors, not silent fallbacks.
 3. **Library does not own CLI args.** The library provides a `ConfigSource` adapter for feeding parsed args into config. It does not depend on clap, does not call `parse()`, and does not prescribe argument structure.
-4. **Trait boundary for every subsystem.** Each subsystem follows three layers: trait (always available) → default implementation (feature-gated) → custom implementation (user-provided). The library says "satisfy this contract" not "use this crate." **Exception:** Logging uses `tracing` directly — the crate itself is the trait boundary. Adding a library-level trait on top would add indirection with no value.
+4. **Trait boundary for every subsystem.** Each subsystem follows three layers: trait (always available) → default implementation (feature-gated) → custom implementation (user-provided). The library says "satisfy this contract" not "use this crate." **Exceptions:** Logging uses `tracing` directly — the crate itself is the trait boundary. SQLite uses `sqlx` directly — there is no useful database abstraction in the Rust ecosystem that sqlx implements and others could substitute. Users who want a custom pool skip the `sqlite` feature and use `with_extension()`.
 5. **Feature-gated opt-in.** Each subsystem lives behind a Cargo feature flag. Downstream projects only pay for what they enable.
 6. **Own it or bridge to it.** For each subsystem, ask: "does it make sense for the library to own this?" Own it (behind a feature) when it's pure boilerplate nobody wants to write twice — logging setup, database pool init, shutdown signal handling, server lifecycle. Bridge to it when it's too application-specific — argument parsing, HTTP routing, middleware, query logic, file content decisions. This is the decision framework for where the library's responsibility ends.
 

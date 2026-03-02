@@ -8,7 +8,9 @@ This document captures what dragon-fnd will become — the subsystems on the hor
 
 The config subsystem is complete: `ConfigSource` trait for extensible input channels, `FileSource` (TOML files), `EnvSource` (environment variables with prefix/separator), a `ConfigBuilder` with fluent API and generic `build::<T>()`, and graph-based `${path.to.field}` variable resolution with topological sort, cycle detection, and full value substitution. `AppContext<C>` uses a type-state builder with compile-time enforcement — `build_sync()` returns `Result` and is only available when config is provided.
 
-The logging subsystem is complete: structured logging via `tracing` with console and file outputs, per-layer `EnvFilter` configuration, time-based file rotation (daily/hourly/never) via `tracing-appender`, size-based file rotation with background gzip compression via a custom `SizeRotatingWriter`, retention cleanup (days-based or file-count), fluent builder API (`LoggingBuilder`, `ConsoleBuilder`, `FileBuilder`), and full `AppContext` integration. Logging is the first feature-gated subsystem (`logging` feature). See DESIGN.md for full details. What follows is everything that's still ahead.
+The logging subsystem is complete: structured logging via `tracing` with console and file outputs, per-layer `EnvFilter` configuration, time-based file rotation (daily/hourly/never) via `tracing-appender`, size-based file rotation with background gzip compression via a custom `SizeRotatingWriter`, retention cleanup (days-based or file-count), fluent builder API (`LoggingBuilder`, `ConsoleBuilder`, `FileBuilder`), and full `AppContext` integration. Logging is the first feature-gated subsystem (`logging` feature).
+
+The SQLite subsystem is complete: database pool initialization and lifecycle via `sqlx` behind the `sqlite` feature. Configurable PRAGMAs (WAL journal mode, foreign keys, busy timeout), filesystem-based runtime migrations, connectivity testing at init, and parent directory creation for file-based databases. `SqliteBuilder` provides a fluent API; `SqliteConfig` provides serde-deserializable config. SQLite is the first async subsystem — `with_sqlite()` transitions the builder to `AsyncBuild`, requiring `build().await` instead of `build_sync()`. See DESIGN.md for full details. What follows is everything that's still ahead.
 
 ---
 
@@ -28,7 +30,7 @@ Each subsystem lives behind its own feature flag. You only pay for what you use 
 | Config | *(always on)* | — | Built |
 | CLI Args (`SerdeSource`) | *(always on)* | Config | Built |
 | Logging | `logging` | Config | Built |
-| SQLite | `sqlite` | Config | Planned |
+| SQLite | `sqlite` | Config | Built |
 | FS Storage | `fs` | Config | Planned |
 | Graceful Shutdown | `shutdown` | — | Planned |
 | HTTP | `http` | Config, Shutdown | Planned |
@@ -161,13 +163,11 @@ Future extensions: additional output sinks (network, syslog).
 
 ---
 
-## SQLite Subsystem
+## SQLite Subsystem — Built
 
-**Feature:** `sqlite`
+**Feature:** `sqlite` — See [DESIGN.md](DESIGN.md) for full details.
 
-Database pool initialization and lifecycle via `sqlx`. Reads the database path and pool configuration from the config layer. Runs pending migrations from a `./migrations/` directory. Tests connectivity at initialization (not deferred to the first query — the old version's lack of this was a known problem).
-
-Enabling this feature transitions the builder to `RequiresAsync`, since `sqlx` pool creation and migration execution are async operations. `build_sync()` becomes unavailable at compile time.
+Future extensions: connection pool metrics, additional database-level PRAGMAs, explicit async shutdown via the shutdown subsystem (`pool.close().await` before drop).
 
 ---
 

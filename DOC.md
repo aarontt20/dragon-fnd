@@ -476,6 +476,7 @@ Top-level error type for the dragon-fnd library.
 Variants:
 - `Config(ConfigError)` - Configuration error
 - `Logging(LoggingError)` - Logging error (feature: `logging`)
+- `Sqlite(SqliteError)` - SQLite error (feature: `sqlite`)
 
 ---
 
@@ -519,6 +520,8 @@ let config = ctx.config();  // &MyConfig, zero-cost
 
 - `extension<T: Send + Sync + 'static>(&self) -> Option<&T>` - Returns a reference to an extension of type `T`, if one was registered via `with_extension()`.
 
+- `sqlite(&self) -> Option<&SqlitePool>` - Returns a reference to the SQLite connection pool, if one was registered via `with_sqlite()`. Feature: `sqlite`.
+
 - `builder() -> AppContextBuilder<NoConfig>` - Creates a new builder for constructing an `AppContext`.
 
 ### `AppContextBuilder<Cfg, Async>`
@@ -527,7 +530,7 @@ Type-state builder for constructing an `AppContext`.
 
 The builder tracks two type-level dimensions:
 - `Cfg`: `NoConfig` → `Configured<C>` (via `with_config()`)
-- `Async`: `SyncBuild` (future async subsystems will add `AsyncBuild`)
+- `Async`: `SyncBuild` → `AsyncBuild` (via `with_sqlite()` or future async subsystems)
 
 **Methods:**
 
@@ -537,7 +540,11 @@ The builder tracks two type-level dimensions:
 
 - `with_logging(self, builder: LoggingBuilder) -> Self` - Registers a logging configuration to be initialized at build time. Available on all builder states (before or after `with_config()`). Feature: `logging`.
 
+- `with_sqlite(self, builder: SqliteBuilder) -> AppContextBuilder<Cfg, AsyncBuild>` - Registers a SQLite database pool to be initialized at build time. Transitions the builder to `AsyncBuild` — `build_sync()` is no longer available. Feature: `sqlite`.
+
 - `build_sync(self) -> Result<AppContext<C>, Error>` - Builds the `AppContext`, initializing all registered subsystems. Only available when config is provided (`Cfg = Configured<C>`) and no async subsystems are registered (`Async = SyncBuild`). Returns an error if any subsystem fails to initialize.
+
+- `async build(self) -> Result<AppContext<C>, Error>` - Builds the `AppContext`, initializing all registered subsystems asynchronously. Only available when config is provided and the builder is in `AsyncBuild` state (e.g., after `with_sqlite()`). Returns an error if any subsystem fails to initialize. Feature: `sqlite`.
 
 ---
 
@@ -682,4 +689,108 @@ let ctx = AppContext::builder()
     )
     .with_config(config)
     .build_sync()?;
+```
+
+---
+
+## Module: `sqlite` (feature: `sqlite`)
+
+SQLite database pool initialization and lifecycle via `sqlx`.
+
+### `SqliteConfig`
+
+Serde-deserializable SQLite configuration. All fields are `pub(crate)` — accessed through `SqliteBuilder` or deserialized from TOML.
+
+- `path: String` (default: `""`) — database file path, or `":memory:"` for in-memory. Empty string errors at init.
+- `max_connections: u32` (default: `5`)
+- `min_connections: u32` (default: `1`)
+- `acquire_timeout_secs: u64` (default: `10`)
+- `idle_timeout_secs: u64` (default: `300`)
+- `migrate: bool` (default: `false`) — run filesystem-based migrations at init
+- `migrations_dir: PathBuf` (default: `"./migrations"`)
+- `journal_mode: JournalMode` (default: `Wal`)
+- `foreign_keys: bool` (default: `true`)
+- `busy_timeout_secs: u64` (default: `5`) — how long SQLite waits when the database is locked
+
+### `JournalMode`
+
+`Wal` | `Delete` | `Memory`
+
+In TOML: `journal_mode = "wal"`, `"delete"`, or `"memory"`.
+
+### `SqliteBuilder`
+
+Fluent builder for SQLite configuration. Wraps `SqliteConfig` internally.
+
+**Methods:**
+
+- `new(path: impl Into<String>) -> Self` — creates a builder with the given database path and defaults
+- `from_config(config: SqliteConfig) -> Self` — bridge from deserialized config (takes ownership)
+- `migrate(self, enable: bool) -> Self` — enable/disable runtime migrations
+- `migrations_dir(self, dir: impl Into<PathBuf>) -> Self` — path to migrations directory
+- `max_connections(self, n: u32) -> Self`
+- `min_connections(self, n: u32) -> Self`
+- `acquire_timeout_secs(self, secs: u64) -> Self`
+- `idle_timeout_secs(self, secs: u64) -> Self`
+- `journal_mode(self, mode: JournalMode) -> Self`
+- `foreign_keys(self, enable: bool) -> Self`
+- `busy_timeout_secs(self, secs: u64) -> Self`
+
+### `SqlitePool`
+
+Re-exported from `sqlx::SqlitePool` so users can reference it without depending on sqlx directly.
+
+### `SqliteError`
+
+Errors that can occur when initializing the SQLite subsystem.
+
+Variants:
+- `EmptyPath` — database path is empty
+- `DirectoryCreationFailed { dir, source }` — could not create parent directory
+- `PoolCreationFailed { source }` — pool creation or connection options failed
+- `ConnectivityTestFailed { source }` — `SELECT 1` test query failed
+- `MigrationsDirNotFound(PathBuf)` — migrations enabled but directory missing
+- `MigrationFailed { source }` — migration execution failed
+
+### Example: From Config File
+
+```toml
+[sqlite]
+path = "data/app.db"
+migrate = true
+migrations_dir = "./migrations"
+journal_mode = "wal"
+foreign_keys = true
+busy_timeout_secs = 10
+```
+
+```rust
+use dragon_fnd::sqlite::SqliteBuilder;
+
+let ctx = AppContext::builder()
+    .with_sqlite(SqliteBuilder::from_config(config.sqlite.clone()))
+    .with_config(config)
+    .build()
+    .await?;
+
+let pool = ctx.sqlite().expect("sqlite was registered");
+```
+
+### Example: Programmatic Builder
+
+```rust
+use dragon_fnd::sqlite::{SqliteBuilder, JournalMode};
+
+let ctx = AppContext::builder()
+    .with_sqlite(
+        SqliteBuilder::new("data/app.db")
+            .migrate(true)
+            .migrations_dir("./migrations")
+            .journal_mode(JournalMode::Wal)
+            .max_connections(10)
+            .busy_timeout_secs(10),
+    )
+    .with_config(config)
+    .build()
+    .await?;
 ```

@@ -2,8 +2,10 @@
 
 Tests are inline (`#[cfg(test)]` modules in source files) plus integration tests in `tests/`.
 
-**Without logging feature: 95 unit tests + 25 integration tests + 3 doc-tests = 123 tests**
-**With logging feature: 149 unit tests + 35 integration tests + 3 doc-tests = 187 tests**
+**No features: 95 unit + 25 integration + 4 doc-tests = 124 tests**
+**With `sqlite`: 121 unit + 40 integration + 4 doc-tests = 165 tests**
+**With `logging`: 149 unit + 35 integration + 4 doc-tests = 188 tests**
+**With `sqlite,logging`: 175 unit + 50 integration + 4 doc-tests = 229 tests**
 
 ---
 
@@ -363,6 +365,101 @@ End-to-end tests for logging integration with AppContext (`tests/logging_init.rs
 
 ---
 
+## Module: `sqlite::error` (4 tests, feature: `sqlite`)
+
+Tests for `SqliteError` display output and conversion to top-level `Error`.
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `empty_path_display` | Display output | `EmptyPath` displays "database path cannot be empty"; has no source |
+| `migrations_dir_not_found_display` | Display output | `MigrationsDirNotFound` includes the path in message |
+| `directory_creation_failed_display` | Display + source | `DirectoryCreationFailed` includes dir path; `source()` returns the I/O error |
+| `top_level_error_from_sqlite` | Error conversion | `SqliteError` converts to top-level `Error` via `From` with "sqlite error:" prefix |
+
+---
+
+## Module: `sqlite::config` (9 tests, feature: `sqlite`)
+
+Tests for `SqliteConfig` defaults, TOML deserialization, and `JournalMode` enum.
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `defaults` | Default values | All 10 fields have correct defaults: empty path, 5 max/1 min connections, WAL, foreign_keys on, 5s busy timeout |
+| `deserialize_minimal_toml` | Minimal config | Only `path` specified; all other fields use defaults |
+| `deserialize_full_toml` | Full config | All 10 fields specified in TOML; all parsed correctly |
+| `deserialize_empty_table` | Empty table | Empty TOML string produces `SqliteConfig::default()` |
+| `journal_mode_wal` | JournalMode variant | `"wal"` deserializes to `JournalMode::Wal` |
+| `journal_mode_delete` | JournalMode variant | `"delete"` deserializes to `JournalMode::Delete` |
+| `journal_mode_memory` | JournalMode variant | `"memory"` deserializes to `JournalMode::Memory` |
+| `journal_mode_invalid` | JournalMode rejection | `"truncate"` returns deserialization error |
+| `memory_path` | Memory path | `":memory:"` parsed as valid path string |
+
+---
+
+## Module: `sqlite::builder` (5 tests, feature: `sqlite`)
+
+Tests for `SqliteBuilder` fluent API.
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `new_sets_path_with_defaults` | Constructor | `new("test.db")` sets path; all other fields are defaults |
+| `from_config_preserves_values` | Config bridge | `from_config()` + `into_config()` round-trips all fields unchanged |
+| `fluent_chain` | Full chain | All 9 builder methods set correct fields in fluent chain |
+| `new_accepts_string_types` | Generic path | `new()` accepts both `&str` and `String` |
+| `memory_database` | Memory path | `new(":memory:")` sets path to `:memory:` |
+
+---
+
+## Module: `sqlite::init` (8 tests, feature: `sqlite`)
+
+Tests for `init_pool()` — pool creation, PRAGMA verification, directory creation, and migrations.
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `init_memory_database` | Happy path | In-memory pool created; `SELECT 1` succeeds |
+| `empty_path_rejected` | Validation | Empty path returns `SqliteError::EmptyPath` |
+| `foreign_keys_enabled` | PRAGMA | `foreign_keys: true` → `PRAGMA foreign_keys` returns 1 |
+| `foreign_keys_disabled` | PRAGMA | `foreign_keys: false` → `PRAGMA foreign_keys` returns 0 |
+| `busy_timeout_is_set` | PRAGMA | `busy_timeout_secs: 10` → `PRAGMA busy_timeout` returns 10000 (milliseconds) |
+| `migrations_dir_missing` | Error path | Missing migrations directory returns `SqliteError::MigrationsDirNotFound` |
+| `file_based_creates_directory` | Dir creation | Non-existent parent directory created automatically for file-based database |
+| `migrations_run_successfully` | Migrations | SQL migration file creates table; `SELECT COUNT(*)` succeeds on migrated table |
+
+---
+
+## Integration Tests: `sqlite` (9 tests, feature: `sqlite`)
+
+End-to-end tests for SQLite subsystem through the `AppContext` builder (`tests/sqlite.rs`).
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `memory_pool_creation` | Memory pool | In-memory pool via `AppContext::builder()` → `with_sqlite()` → `build().await` |
+| `file_pool_creation` | File pool | File-based pool creates database file on disk |
+| `pragma_foreign_keys_enabled` | PRAGMA e2e | Foreign keys enabled through full builder chain |
+| `pragma_foreign_keys_disabled` | PRAGMA e2e | Foreign keys disabled through full builder chain |
+| `pragma_busy_timeout` | PRAGMA e2e | Busy timeout (7s → 7000ms) verified through full builder chain |
+| `pragma_journal_mode_wal_requires_file` | WAL mode | WAL journal mode verified on file-based database |
+| `migrations_from_directory` | Migrations e2e | Migration creates table; insert + count verifies schema |
+| `from_config_via_toml` | Config bridge | TOML → `SqliteConfig` → `SqliteBuilder::from_config()` → working pool |
+| `sqlite_pool_reexport_is_usable` | Re-export | `dragon_fnd::sqlite::SqlitePool` type alias works without direct sqlx dependency |
+
+---
+
+## Integration Tests: `context_async` (6 tests, feature: `sqlite`)
+
+Tests for `AppContextBuilder` async type-state with SQLite (`tests/context_async.rs`).
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `async_builder_with_config_and_sqlite` | Full chain | `with_config()` → `with_sqlite()` → `build().await` produces context with both |
+| `sqlite_before_config` | Builder ordering | `with_sqlite()` before `with_config()` works — registration order doesn't matter |
+| `async_build_without_sqlite` | Pool presence | Registered sqlite pool is `Some` via `ctx.sqlite()` |
+| `async_build_with_extensions` | Extensions + async | Extensions survive async build alongside sqlite |
+| `async_context_debug` | Debug impl | `AppContext` debug output includes `sqlite_pool: true` |
+| `builder_debug_with_sqlite` | Builder debug | `AppContextBuilder` debug output includes `sqlite: true` |
+
+---
+
 ## Integration Tests: `config_builder` (10 tests)
 
 End-to-end tests for `ConfigBuilder` (`tests/config_builder.rs`). Custom sources use `ConfigValue` constructors.
@@ -399,12 +496,13 @@ Tests for the type-state `AppContext` builder and extension slot (`tests/context
 
 ---
 
-## Doc-Tests (3 tests)
+## Doc-Tests (4 tests)
 
 | Test | Coverage | Behavior Verified |
 |------|----------|-------------------|
 | `AppContext` usage example | `no_run` compile check | Usage example compiles correctly |
-| `AppContext` compile_fail | Type-state enforcement | `AppContext::builder().build_sync()` without `with_config()` does not compile |
+| `AppContext` compile_fail (no config) | Type-state enforcement | `AppContext::builder().build_sync()` without `with_config()` does not compile |
+| `AppContext` compile_fail (async) | Type-state enforcement | `with_sqlite().build_sync()` does not compile — must use `build().await` |
 | `SerdeSource` priority example | `no_run` compile check | Usage example with multi-source priority compiles correctly |
 
 ---
@@ -419,15 +517,21 @@ Tests for the type-state `AppContext` builder and extension slot (`tests/context
 - `resolve_references()` - comprehensive coverage including all error variants, type preservation, chaining
 - `SerdeSource` - struct serialization, None omission, nested structs, enums, Vec fields, error cases, full pipeline roundtrip
 - `ConfigBuilder` - file loading, source ordering, custom sources, cross-source references, error propagation
-- `AppContext` - type-state builder, fallible `build_sync()`, compile-time enforcement, extension slot (store, retrieve, override, ordering, debug)
+- `AppContext` - type-state builder, fallible `build_sync()`, async `build()`, compile-time enforcement, extension slot (store, retrieve, override, ordering, debug)
 - `LoggingConfig` - defaults, round-trip, all format/rotation variants, retention fields, per-layer filters
 - `LoggingBuilder` / `ConsoleBuilder` / `FileBuilder` - defaults, overrides, composition, mutual exclusion
 - `init_logging()` - filter building, disabled path, retention validation, rotation validation, boundary tests, directory creation
 - `cleanup_old_logs()` - days retention, file count retention, missing dir, prefix filtering
 - `SizeRotatingWriter` - creation, byte recovery, write tracking, rotation threshold, compression, rapid rotations, timestamp format, inline retention, gz retention
+- `SqliteConfig` / `JournalMode` - defaults, TOML deserialization (minimal, full, empty), all journal mode variants, invalid mode, memory path
+- `SqliteBuilder` - constructor, config round-trip, full fluent chain, generic path types, memory database
+- `init_pool()` - memory and file pools, PRAGMA verification (foreign_keys, busy_timeout), directory creation, migrations, empty path rejection
+- `SqliteError` - display output for all testable variants, source chain, top-level Error conversion
+- `AppContext` async path - config+sqlite builder chain, registration ordering, extensions with async, debug output, compile-time `build_sync()` prevention
 
 ### Partially Covered
 - `FileSource` - happy path, not-found, and parse error; missing I/O error case (platform-specific)
+- `SqliteError` - `PoolCreationFailed`, `ConnectivityTestFailed`, `MigrationFailed` display/source tested indirectly via integration tests but not unit-tested (require real sqlx errors)
 
 ### Not Covered
-- Error display strings (tested indirectly via `matches!` but not asserted on text)
+- Error display strings (tested indirectly via `matches!` but not asserted on text) — exception: `SqliteError` display strings are explicitly asserted

@@ -10,4 +10,8 @@ pub enum Error {
     #[cfg(feature = "logging")]
     #[error("logging error: {0}")]
     Logging(#[from] crate::logging::LoggingError),
+
+    #[cfg(feature = "sqlite")]
+    #[error("sqlite error: {0}")]
+    Sqlite(#[from] crate::sqlite::SqliteError),
 }
