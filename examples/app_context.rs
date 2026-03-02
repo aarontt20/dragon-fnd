@@ -27,8 +27,8 @@ fn main() -> Result<(), dragon_fnd::Error> {
     let ctx = AppContext::builder()
         .with_config(
             ConfigBuilder::new()
-                .with_file("examples/default.toml", true)
-                .with_file("examples/dev.toml", false)
+                .with_file("examples/config/default.toml", true)
+                .with_file("examples/config/dev.toml", false)
                 .build::<AppConfig>()?,
         )
         .build_sync()?;

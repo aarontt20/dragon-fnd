@@ -1,0 +1,20 @@
+[app]
+name = "my-service"
+env = "production"
+version = "2.1.0"
+
+# Pure reference — preserves the integer type
+port = 8080
+
+[server]
+host = "0.0.0.0"
+# String interpolation — embeds referenced values into a larger string
+bind = "${server.host}:${app.port}"
+banner = "${app.name} v${app.version} (${app.env})"
+
+[database]
+host = "db.internal"
+port = 5432
+name = "${app.name}-db"
+# Reference chain: database.name references app.name, and url references database.name
+url = "postgres://${database.host}:${database.port}/${database.name}"
