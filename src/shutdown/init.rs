@@ -2,7 +2,7 @@ use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 
@@ -105,11 +105,12 @@ impl Shutdown {
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        if self.is_triggered() {
-            return Err(ShutdownError::AlreadyTriggered);
-        }
         let boxed: BoxedCleanupHook = Box::new(move || Box::pin(hook()));
         let mut hooks = self.inner.hooks.lock().unwrap_or_else(|e| e.into_inner());
+        // Check under the lock to prevent TOCTOU race with trigger()/wait()
+        if self.inner.token.is_cancelled() {
+            return Err(ShutdownError::AlreadyTriggered);
+        }
         hooks.push((name.to_owned(), boxed));
         Ok(())
     }
@@ -127,20 +128,7 @@ impl Shutdown {
         let inner = self.inner.clone();
         self.inner
             .result
-            .get_or_init(|| async move {
-                // Outer catch_unwind: ensure OnceCell is always populated
-                let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    Self::run_shutdown(inner)
-                }));
-                match result {
-                    Ok(fut) => fut.await,
-                    Err(_) => {
-                        #[cfg(feature = "logging")]
-                        tracing::error!("unexpected panic in shutdown orchestration");
-                        Ok(())
-                    }
-                }
-            })
+            .get_or_init(|| async move { Self::run_shutdown(inner).await })
             .await
             .clone()
     }
@@ -188,6 +176,7 @@ impl Shutdown {
 
         let hook_names: Vec<String> = hooks.iter().map(|(name, _)| name.clone()).collect();
         let mut completed = Vec::with_capacity(hooks.len());
+        let start = Instant::now();
 
         let cleanup = async {
             for (name, hook) in hooks {
@@ -198,13 +187,15 @@ impl Shutdown {
                         // Spawn as a task so panics during .await are caught
                         // via JoinHandle rather than propagating
                         let handle = tokio::task::spawn(fut);
-                        if let Err(e) = handle.await {
-                            if e.is_panic() {
+                        match handle.await {
+                            Ok(()) => completed.push(name),
+                            Err(e) if e.is_panic() => {
                                 #[cfg(feature = "logging")]
                                 tracing::error!("cleanup hook '{name}' panicked");
                                 #[cfg(not(feature = "logging"))]
                                 eprintln!("error: cleanup hook '{name}' panicked");
                             }
+                            Err(_) => {}
                         }
                     }
                     Err(_) => {
@@ -214,7 +205,6 @@ impl Shutdown {
                         eprintln!("error: cleanup hook '{name}' panicked during creation");
                     }
                 }
-                completed.push(name);
             }
         };
 
@@ -222,12 +212,9 @@ impl Shutdown {
             tokio::time::timeout(inner.grace_period, cleanup).await;
 
         if timeout_result.is_err() {
-            let remaining: Vec<String> = hook_names
-                .into_iter()
-                .filter(|name| !completed.contains(name))
-                .collect();
+            let remaining = hook_names[completed.len()..].to_vec();
             return Err(ShutdownError::GracePeriodExceeded {
-                elapsed: inner.grace_period,
+                elapsed: start.elapsed(),
                 completed,
                 remaining,
             });
@@ -352,9 +339,9 @@ mod tests {
                 remaining,
                 ..
             } => {
-                // "slow" runs first (reverse order), "fast" is remaining
+                // "slow" runs first (reverse order) and blocks, "fast" never runs
                 assert!(remaining.contains(&"fast".to_string()));
-                assert!(completed.is_empty() || completed.contains(&"slow".to_string()));
+                assert!(completed.is_empty());
             }
             other => panic!("expected GracePeriodExceeded, got: {other:?}"),
         }
@@ -427,5 +414,86 @@ mod tests {
         assert!(debug.contains("Shutdown"));
         assert!(debug.contains("is_triggered"));
         assert!(debug.contains("grace_period"));
+    }
+
+    #[tokio::test]
+    async fn zero_grace_period_times_out_immediately() {
+        let shutdown =
+            init_shutdown(ShutdownBuilder::new().grace_period(Duration::ZERO)).unwrap();
+        shutdown
+            .register_cleanup("any", || async {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            })
+            .unwrap();
+        shutdown.trigger();
+        let result = shutdown.wait().await;
+        assert!(matches!(
+            result,
+            Err(ShutdownError::GracePeriodExceeded { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn sync_hook_panic_does_not_poison() {
+        let shutdown = init_shutdown(test_builder()).unwrap();
+        let ran = Arc::new(AtomicUsize::new(0));
+
+        let r = ran.clone();
+        shutdown
+            .register_cleanup("good", move || async move {
+                r.fetch_add(1, Ordering::SeqCst);
+            })
+            .unwrap();
+
+        shutdown
+            .register_cleanup("sync-panicker", || {
+                panic!("sync boom");
+                #[allow(unreachable_code)]
+                async {}
+            })
+            .unwrap();
+
+        shutdown.trigger();
+        let result = shutdown.wait().await;
+        assert!(result.is_ok());
+        // "sync-panicker" runs first (reverse order), "good" still runs
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn panicked_hook_not_counted_as_completed() {
+        let shutdown =
+            init_shutdown(ShutdownBuilder::new().grace_period(Duration::from_millis(50))).unwrap();
+
+        shutdown
+            .register_cleanup("fast", || async {})
+            .unwrap();
+        shutdown
+            .register_cleanup("panicker", || async {
+                panic!("boom");
+            })
+            .unwrap();
+        shutdown
+            .register_cleanup("slow", || async {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            })
+            .unwrap();
+
+        shutdown.trigger();
+        let result = shutdown.wait().await;
+        let err = result.unwrap_err();
+
+        match err {
+            ShutdownError::GracePeriodExceeded {
+                completed,
+                remaining,
+                ..
+            } => {
+                // "slow" runs first (reverse), blocks; "panicker" and "fast" never run
+                assert!(!completed.contains(&"panicker".to_string()));
+                assert!(!remaining.is_empty());
+            }
+            other => panic!("expected GracePeriodExceeded, got: {other:?}"),
+        }
     }
 }

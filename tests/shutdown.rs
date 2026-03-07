@@ -105,7 +105,7 @@ async fn grace_period_exceeded() {
     match err {
         ShutdownError::GracePeriodExceeded { remaining, .. } => {
             // "slow" was still running when time ran out
-            assert!(!remaining.is_empty() || true); // timeout fires
+            assert!(!remaining.is_empty());
         }
         other => panic!("expected GracePeriodExceeded, got: {other:?}"),
     }
