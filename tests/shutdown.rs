@@ -103,9 +103,14 @@ async fn grace_period_exceeded() {
     let err = shutdown.wait().await.unwrap_err();
 
     match err {
-        ShutdownError::GracePeriodExceeded { remaining, .. } => {
+        ShutdownError::GracePeriodExceeded {
+            remaining,
+            panicked,
+            ..
+        } => {
             // "slow" was still running when time ran out
-            assert!(!remaining.is_empty());
+            assert_eq!(remaining, vec!["slow"]);
+            assert!(panicked.is_empty());
         }
         other => panic!("expected GracePeriodExceeded, got: {other:?}"),
     }

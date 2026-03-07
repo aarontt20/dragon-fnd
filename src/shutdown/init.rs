@@ -84,6 +84,11 @@ impl Shutdown {
     ///
     /// Idempotent — calling on an already-cancelled token is a no-op.
     pub fn trigger(&self) {
+        // Acquire the hooks lock before cancelling the token so that any
+        // concurrent `register_cleanup` call either completes its push
+        // before we cancel (and the hook will be drained by `run_shutdown`),
+        // or sees `is_cancelled() == true` after we release the lock.
+        let _guard = self.inner.hooks.lock().unwrap_or_else(|e| e.into_inner());
         self.inner.token.cancel();
     }
 
@@ -107,7 +112,10 @@ impl Shutdown {
     {
         let boxed: BoxedCleanupHook = Box::new(move || Box::pin(hook()));
         let mut hooks = self.inner.hooks.lock().unwrap_or_else(|e| e.into_inner());
-        // Check under the lock to prevent TOCTOU race with trigger()/wait()
+        // trigger() also acquires this lock before cancelling the token,
+        // so this check is race-free: either trigger() has completed and
+        // is_cancelled() returns true, or it hasn't and the hook is safe
+        // to push (trigger() will see it when it drains).
         if self.inner.token.is_cancelled() {
             return Err(ShutdownError::AlreadyTriggered);
         }
@@ -159,6 +167,10 @@ impl Shutdown {
                 // handle gracefully (Design Constraint 1: no panicking)
                 #[cfg(feature = "logging")]
                 tracing::warn!("signal state already consumed — proceeding with cleanup");
+                #[cfg(not(feature = "logging"))]
+                eprintln!(
+                    "warning: signal state already consumed — proceeding with cleanup"
+                );
             }
         }
 
@@ -176,6 +188,7 @@ impl Shutdown {
 
         let hook_names: Vec<String> = hooks.iter().map(|(name, _)| name.clone()).collect();
         let mut completed = Vec::with_capacity(hooks.len());
+        let mut panicked = Vec::new();
         let start = Instant::now();
 
         let cleanup = async {
@@ -194,8 +207,15 @@ impl Shutdown {
                                 tracing::error!("cleanup hook '{name}' panicked");
                                 #[cfg(not(feature = "logging"))]
                                 eprintln!("error: cleanup hook '{name}' panicked");
+                                panicked.push(name);
                             }
-                            Err(_) => {}
+                            Err(_) => {
+                                #[cfg(feature = "logging")]
+                                tracing::warn!("cleanup hook '{name}' was cancelled");
+                                #[cfg(not(feature = "logging"))]
+                                eprintln!("warning: cleanup hook '{name}' was cancelled");
+                                panicked.push(name);
+                            }
                         }
                     }
                     Err(_) => {
@@ -203,6 +223,7 @@ impl Shutdown {
                         tracing::error!("cleanup hook '{name}' panicked during creation");
                         #[cfg(not(feature = "logging"))]
                         eprintln!("error: cleanup hook '{name}' panicked during creation");
+                        panicked.push(name);
                     }
                 }
             }
@@ -212,10 +233,15 @@ impl Shutdown {
             tokio::time::timeout(inner.grace_period, cleanup).await;
 
         if timeout_result.is_err() {
-            let remaining = hook_names[completed.len()..].to_vec();
+            // Hooks run sequentially, so completed + panicked are a prefix
+            // of hook_names. Remaining = everything else (includes the hook
+            // that was still running when the timeout fired).
+            let finished = completed.len() + panicked.len();
+            let remaining = hook_names[finished..].to_vec();
             return Err(ShutdownError::GracePeriodExceeded {
                 elapsed: start.elapsed(),
                 completed,
+                panicked,
                 remaining,
             });
         }
@@ -336,12 +362,14 @@ mod tests {
         match err {
             ShutdownError::GracePeriodExceeded {
                 completed,
+                panicked,
                 remaining,
                 ..
             } => {
                 // "slow" runs first (reverse order) and blocks, "fast" never runs
-                assert!(remaining.contains(&"fast".to_string()));
                 assert!(completed.is_empty());
+                assert!(panicked.is_empty());
+                assert_eq!(remaining, vec!["slow", "fast"]);
             }
             other => panic!("expected GracePeriodExceeded, got: {other:?}"),
         }
@@ -486,14 +514,57 @@ mod tests {
         match err {
             ShutdownError::GracePeriodExceeded {
                 completed,
+                panicked,
                 remaining,
                 ..
             } => {
-                // "slow" runs first (reverse), blocks; "panicker" and "fast" never run
-                assert!(!completed.contains(&"panicker".to_string()));
-                assert!(!remaining.is_empty());
+                // Reverse order: "slow" runs first and blocks until timeout.
+                // "panicker" and "fast" never get attempted.
+                assert!(completed.is_empty());
+                assert!(panicked.is_empty());
+                assert_eq!(remaining, vec!["slow", "panicker", "fast"]);
             }
             other => panic!("expected GracePeriodExceeded, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn panicked_hook_tracked_separately() {
+        let shutdown = init_shutdown(test_builder()).unwrap();
+
+        shutdown
+            .register_cleanup("good", || async {})
+            .unwrap();
+        shutdown
+            .register_cleanup("panicker", || async {
+                panic!("boom");
+            })
+            .unwrap();
+
+        shutdown.trigger();
+        let result = shutdown.wait().await;
+        // All hooks completed (or panicked) within grace period — Ok
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn concurrent_wait_runs_hooks_once() {
+        let shutdown = init_shutdown(test_builder()).unwrap();
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        let c = counter.clone();
+        shutdown
+            .register_cleanup("counter", move || async move {
+                c.fetch_add(1, Ordering::SeqCst);
+            })
+            .unwrap();
+
+        shutdown.trigger();
+
+        let (r1, r2) = tokio::join!(shutdown.wait(), shutdown.wait());
+        assert!(r1.is_ok());
+        assert!(r2.is_ok());
+        // Hook ran exactly once despite two concurrent wait() callers
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 }

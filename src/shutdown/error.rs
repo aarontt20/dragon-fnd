@@ -17,11 +17,12 @@ pub enum ShutdownError {
         source: Arc<io::Error>,
     },
 
-    #[error("cleanup grace period exceeded ({} completed, {} remaining)",
-        completed.len(), remaining.len())]
+    #[error("cleanup grace period exceeded ({} completed, {} panicked, {} remaining)",
+        completed.len(), panicked.len(), remaining.len())]
     GracePeriodExceeded {
         elapsed: Duration,
         completed: Vec<String>,
+        panicked: Vec<String>,
         remaining: Vec<String>,
     },
 
@@ -59,11 +60,12 @@ mod tests {
         let err = ShutdownError::GracePeriodExceeded {
             elapsed: Duration::from_secs(30),
             completed: vec!["db-flush".into()],
+            panicked: vec!["bad-hook".into()],
             remaining: vec!["cache-clear".into(), "log-sync".into()],
         };
         assert_eq!(
             err.to_string(),
-            "cleanup grace period exceeded (1 completed, 2 remaining)"
+            "cleanup grace period exceeded (1 completed, 1 panicked, 2 remaining)"
         );
     }
 

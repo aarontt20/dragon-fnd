@@ -78,8 +78,9 @@ pub struct AppContext<C> {
     // 1. config — pure data, no cleanup
     // 2. extensions — user-provided, drop before subsystems
     // 3. [future: http_handle] — drop server before database
-    // 4. sqlite_pool — close database connections (logging during drop is captured)
-    // 5. log_guard — MUST be last, flushes pending log writes
+    // 4. shutdown — run cleanup hooks while pool/logger are still alive
+    // 5. sqlite_pool — close database connections (logging during drop is captured)
+    // 6. log_guard — MUST be last, flushes pending log writes
     config: C,
     extensions: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
     #[cfg(feature = "shutdown")]

@@ -48,7 +48,7 @@ pub(crate) async fn wait_for_signal(state: &mut SignalState) -> Result<(), Shutd
 
     #[cfg(not(unix))]
     {
-        let _ = state;
+        let _ = state; // suppress unused warning — state is empty on non-unix
         tokio::signal::ctrl_c()
             .await
             .map_err(|e| ShutdownError::SignalHandler {
