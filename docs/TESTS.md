@@ -3,9 +3,10 @@
 Tests are inline (`#[cfg(test)]` modules in source files) plus integration tests in `tests/`.
 
 **No features: 95 unit + 25 integration + 4 doc-tests = 124 tests**
+**With `shutdown`: 124 unit + 37 integration + 5 doc-tests = 166 tests**
 **With `sqlite`: 121 unit + 40 integration + 4 doc-tests = 165 tests**
 **With `logging`: 149 unit + 35 integration + 4 doc-tests = 188 tests**
-**With `sqlite,logging`: 175 unit + 50 integration + 4 doc-tests = 229 tests**
+**With `shutdown,sqlite,logging`: 208 unit + 62 integration + 5 doc-tests = 275 tests**
 
 ---
 

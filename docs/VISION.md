@@ -10,7 +10,9 @@ The config subsystem is complete: `ConfigSource` trait for extensible input chan
 
 The logging subsystem is complete: structured logging via `tracing` with console and file outputs, per-layer `EnvFilter` configuration, time-based file rotation (daily/hourly/never) via `tracing-appender`, size-based file rotation with background gzip compression via a custom `SizeRotatingWriter`, retention cleanup (days-based or file-count), fluent builder API (`LoggingBuilder`, `ConsoleBuilder`, `FileBuilder`), and full `AppContext` integration. Logging is the first feature-gated subsystem (`logging` feature).
 
-The SQLite subsystem is complete: database pool initialization and lifecycle via `sqlx` behind the `sqlite` feature. Configurable PRAGMAs (WAL journal mode, foreign keys, busy timeout), filesystem-based runtime migrations, connectivity testing at init, and parent directory creation for file-based databases. `SqliteBuilder` provides a fluent API; `SqliteConfig` provides serde-deserializable config. SQLite is the first async subsystem — `with_sqlite()` transitions the builder to `AsyncBuild`, requiring `build().await` instead of `build_sync()`. See DESIGN.md for full details. What follows is everything that's still ahead.
+The SQLite subsystem is complete: database pool initialization and lifecycle via `sqlx` behind the `sqlite` feature. Configurable PRAGMAs (WAL journal mode, foreign keys, busy timeout), filesystem-based runtime migrations, connectivity testing at init, and parent directory creation for file-based databases. `SqliteBuilder` provides a fluent API; `SqliteConfig` provides serde-deserializable config. SQLite is the first async subsystem — `with_sqlite()` transitions the builder to `AsyncBuild`, requiring `build().await` instead of `build_sync()`. See DESIGN.md for full details.
+
+The graceful shutdown subsystem is complete: signal handling (SIGTERM/SIGINT on Unix, Ctrl+C elsewhere), `CancellationToken` distribution for cooperative shutdown, cleanup hooks with reverse-order execution, and grace period enforcement. `ShutdownBuilder` provides a fluent API. Shutdown is the second async subsystem — `with_shutdown()` also transitions to `AsyncBuild`. See DESIGN.md for full details. What follows is everything that's still ahead.
 
 ---
 
@@ -32,7 +34,7 @@ Each subsystem lives behind its own feature flag. You only pay for what you use 
 | Logging | `logging` | Config | Built |
 | SQLite | `sqlite` | Config | Built |
 | FS Storage | `fs` | Config | Planned |
-| Graceful Shutdown | `shutdown` | — | Planned |
+| Graceful Shutdown | `shutdown` | — | Built |
 | HTTP | `http` | Config, Shutdown | Planned |
 
 ---
@@ -187,15 +189,11 @@ The subsystem manages paths and directories — it does not manage file contents
 
 ---
 
-## Graceful Shutdown Subsystem
+## Graceful Shutdown Subsystem — Built
 
-**Feature:** `shutdown`
+**Feature:** `shutdown` — See [DESIGN.md](DESIGN.md) for full details.
 
-Signal handling and coordinated cleanup. Registers handlers for SIGTERM and SIGINT (with platform-appropriate behavior on Windows). Produces a `ShutdownSignal` that other subsystems can clone and await.
-
-Cleanup hooks run in reverse registration order when shutdown is triggered. Subsystems that hold resources (database pools, file handles, network listeners) register cleanup logic during initialization. The shutdown subsystem orchestrates teardown.
-
-This subsystem has no config dependency — it is pure runtime infrastructure. It does not need the config layer to know how to handle signals.
+Future extensions: trait boundary for custom trigger sources (when a second trigger source materializes), serde-deserializable `ShutdownConfig` for TOML-based grace period configuration, graph-based subsystem teardown (library-managed resources torn down automatically in dependency order — the HTTP subsystem is the natural trigger for this).
 
 ---
 

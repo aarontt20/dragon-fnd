@@ -6,7 +6,7 @@ This document describes dragon-fnd as it exists in code today. For future plans 
 
 ## What It Does
 
-dragon-fnd is a foundation library for Rust applications that provides typed configuration loading from multiple sources (TOML files, environment variables, custom sources) with deep merge semantics, graph-based variable reference resolution, and a type-state application context builder. It ships as a single crate with feature-gated subsystems — currently config (always on), logging (`logging` feature), and SQLite database (`sqlite` feature). The library does not own `main()` and does not prescribe application structure.
+dragon-fnd is a foundation library for Rust applications that provides typed configuration loading from multiple sources (TOML files, environment variables, custom sources) with deep merge semantics, graph-based variable reference resolution, and a type-state application context builder. It ships as a single crate with feature-gated subsystems — currently config (always on), logging (`logging` feature), SQLite database (`sqlite` feature), and graceful shutdown (`shutdown` feature). The library does not own `main()` and does not prescribe application structure.
 
 ---
 
@@ -15,7 +15,7 @@ dragon-fnd is a foundation library for Rust applications that provides typed con
 ```
 src/
 ├── lib.rs                 # Crate root, re-exports public API
-├── error.rs               # Top-level Error enum (3 variants)
+├── error.rs               # Top-level Error enum (4 variants)
 ├── config/
 │   ├── mod.rs             # Public exports: ConfigBuilder, ConfigError, ConfigSource, ConfigEntry, ConfigValue, ConfigTable, SerdeSource
 │   ├── source.rs          # ConfigSource trait, ConfigEntry, ConfigValue, ConfigTable, merge_at_path, deep_merge
@@ -39,11 +39,17 @@ src/
 │   ├── builder.rs         # SqliteBuilder (fluent API)
 │   ├── error.rs           # SqliteError enum (6 variants)
 │   └── init.rs            # Pool creation, connectivity test, migrations
+├── shutdown/              # Feature: "shutdown"
+│   ├── mod.rs             # Re-exports, pub(crate) init_shutdown
+│   ├── builder.rs         # ShutdownBuilder (fluent API, Debug, Clone, #[must_use])
+│   ├── init.rs            # Shutdown struct, init_shutdown(), cleanup orchestration
+│   ├── signal.rs          # Platform-aware signal handling (SIGTERM/SIGINT on Unix, Ctrl+C elsewhere)
+│   └── error.rs           # ShutdownError enum (3 variants, Clone)
 └── context/
     └── mod.rs             # AppContext<C> with type-state AppContextBuilder, extension slot
 ```
 
-23 source files. Tests are inline (`#[cfg(test)]` modules) plus integration tests in `tests/`.
+28 source files. Tests are inline (`#[cfg(test)]` modules) plus integration tests in `tests/`.
 
 ---
 
@@ -296,6 +302,87 @@ All `sqlx::Error` inner sources use `#[source]`, not `#[from]` — each variant 
 
 ---
 
+## Graceful Shutdown System
+
+**Feature:** `shutdown` — opt-in via `Cargo.toml`.
+
+Signal handling, cancellation propagation, and orchestrated cleanup. The subsystem installs OS signal handlers eagerly at build time, distributes a `CancellationToken` for cooperative shutdown, and runs registered cleanup hooks in reverse order within a configurable grace period. Shutdown is the second async subsystem — enabling it transitions the builder to `AsyncBuild`, requiring `build().await`.
+
+### Architecture Decision: No Trait Boundary
+
+The shutdown subsystem defers a trait boundary, for pragmatic reasons similar to SQLite: there is currently no second implementation to design the trait against. Shutdown trigger sources are diverse (OS signals, message queues, file watches, Windows service control), but until a concrete second source materializes, designing the trait risks getting the abstraction wrong. When a second trigger source is needed, the concrete `Shutdown` API will inform the trait extraction. This is a third explicit exception to CLAUDE.md Constraint 4.
+
+### Architecture Decision: No Config Dependency
+
+This subsystem has no serde-deserializable config struct and no TOML section. The grace period is set programmatically via `ShutdownBuilder`. This is a deferral — when users need `[shutdown] grace_period_secs = 30` in config files, add `ShutdownConfig`, `from_config()`, and `into_config()` following the existing pattern.
+
+### Builder Type (`src/shutdown/builder.rs`)
+
+`ShutdownBuilder` — no config struct, no `into_config()`:
+
+- `#[must_use]` attribute, `Debug`, `Clone`, `Default`
+- `new()` — 30-second default grace period
+- `grace_period(Duration)` — override the total time budget for cleanup hooks
+- Consumed directly by `init_shutdown()` (unlike `LoggingBuilder` and `SqliteBuilder` which extract a config struct)
+
+### Shutdown Handle (`src/shutdown/init.rs`)
+
+`Shutdown` wraps `Arc<ShutdownInner>` — shared via `&self` on `AppContext`. Five public methods:
+
+- `token() -> CancellationToken` — clone of the cancellation token. `Send + Sync + Clone` — pass to worker tasks, threads, or other subsystems
+- `trigger()` — programmatically trigger shutdown. Idempotent. Acquires the hooks lock before cancelling the token to close the TOCTOU race with `register_cleanup()`
+- `is_triggered() -> bool` — check if shutdown has been triggered
+- `register_cleanup(name, hook) -> Result<(), ShutdownError>` — register an async cleanup hook. Returns `AlreadyTriggered` if shutdown was already triggered (no silent loss). The hooks lock is held during the `is_cancelled()` check, making the check-then-push race-free with `trigger()`
+- `wait() -> Result<(), ShutdownError>` — block until shutdown completes. All callers receive the same result via `tokio::sync::OnceCell`. `Ok(())` means "shutdown completed in time" — individual hook panics are logged but do not fail the overall result. **Not cancellation-safe** — do not use inside `tokio::select!`
+
+### Internal Architecture
+
+```rust
+struct ShutdownInner {
+    token: CancellationToken,
+    hooks: std::sync::Mutex<Vec<(String, BoxedCleanupHook)>>,
+    grace_period: Duration,
+    result: tokio::sync::OnceCell<Result<(), ShutdownError>>,
+    signal_state: std::sync::Mutex<Option<SignalState>>,
+}
+```
+
+All internal mutexes are `std::sync::Mutex`, not `tokio::sync::Mutex` — locks are never held across `.await` points (the compiler enforces this since `MutexGuard` is `!Send`). `register_cleanup()` is synchronous. `Drop` uses `try_lock().ok()` to avoid panicking on a poisoned mutex during stack unwinding.
+
+### Signal Handling (`src/shutdown/signal.rs`)
+
+Signal handlers are installed eagerly in `init_shutdown()`, not deferred to `wait()`. On Unix, both SIGTERM and SIGINT are pre-registered via `tokio::signal::unix::signal()` so that signals arriving between `build()` and `wait()` are buffered. On non-Unix platforms, `tokio::signal::ctrl_c()` handles Ctrl+C. Installation failures surface immediately at build time as `ShutdownError::SignalHandler`.
+
+### Cleanup Orchestration
+
+`wait()` uses `OnceCell::get_or_init` — all work happens inside the init closure:
+
+1. Take signal state via `Mutex<Option<SignalState>>.take()`
+2. `select!` on signal and token — first one wins. If signal fires, cancel the token
+3. Drain hooks under the lock, reverse, release lock immediately
+4. Run hooks sequentially inside `tokio::time::timeout(grace_period, ...)`
+5. Each hook is spawned via `tokio::task::spawn` for panic isolation (`catch_unwind` doesn't work across `.await` boundaries). Panics in the synchronous closure are caught via `std::panic::catch_unwind`
+6. Three-way hook accounting: `completed`, `panicked`, `remaining` tracked separately
+7. Return `Ok(())` or `GracePeriodExceeded` with all three lists plus elapsed time
+
+### Drop Behavior
+
+`Shutdown` implements `Drop` with a best-effort diagnostic. If hooks are registered and `wait()` was never called, a warning is emitted via `tracing::warn!` (or `eprintln!` without the logging feature). The `Drop` impl uses `try_lock().ok()` and checks `result.initialized()` — no panics.
+
+### Error Types (`src/shutdown/error.rs`)
+
+`ShutdownError` — 3 variants, `#[non_exhaustive]`, `Clone`:
+
+| Variant | Meaning |
+|---------|---------|
+| `SignalHandler { source: Arc<io::Error> }` | Failed to install OS signal handler |
+| `GracePeriodExceeded { elapsed, completed, panicked, remaining }` | Cleanup hooks did not finish within the grace period |
+| `AlreadyTriggered` | Cleanup hook registered after shutdown was triggered |
+
+`ShutdownError` derives `Clone`, unlike other subsystem error types. This is required by the `OnceCell`-based result sharing in `wait()` — multiple callers need to receive the same result. `Arc<io::Error>` wraps the non-`Clone` `io::Error` to enable this (standard ecosystem pattern: hyper, tonic). Requires Rust 1.81+ for the `impl Error for Arc<E>` blanket impl.
+
+---
+
 ## Error Types
 
 ### ConfigError
@@ -323,12 +410,13 @@ All `sqlx::Error` inner sources use `#[source]`, not `#[from]` — each variant 
 
 ### Top-level Error
 
-`src/error.rs` — 3 variants, `#[non_exhaustive]`:
+`src/error.rs` — 4 variants, `#[non_exhaustive]`:
 
 | Variant | Meaning |
 |---------|---------|
 | `Config(ConfigError)` | Wraps any config error (with `#[from]` for `?` conversion) |
 | `Logging(LoggingError)` | Wraps any logging error (cfg-gated behind `logging` feature) |
+| `Shutdown(ShutdownError)` | Wraps any shutdown error (cfg-gated behind `shutdown` feature) |
 | `Sqlite(SqliteError)` | Wraps any sqlite error (cfg-gated behind `sqlite` feature) |
 
 ---
@@ -342,14 +430,16 @@ pub struct AppContext<C> {
     // Fields ordered for correct drop sequence (Rust drops in declaration order):
     config: C,                            // 1. pure data, no cleanup
     extensions: HashMap<...>,             // 2. user-provided, drop before subsystems
+    #[cfg(feature = "shutdown")]
+    shutdown: Option<Shutdown>,           // 3. run cleanup hooks while pool/logger are alive
     #[cfg(feature = "sqlite")]
-    sqlite_pool: Option<SqlitePool>,      // 3. close database connections
+    sqlite_pool: Option<SqlitePool>,      // 4. close database connections
     #[cfg(feature = "logging")]
-    log_guard: Option<WorkerGuard>,       // 4. LAST — flushes pending log writes
+    log_guard: Option<WorkerGuard>,       // 5. LAST — flushes pending log writes
 }
 ```
 
-`AppContext::config()` returns `&C` — zero-cost after build. `extension::<T>()` returns `Option<&T>` — looks up a type-keyed value registered via `with_extension()` on the builder. `sqlite()` returns `Option<&SqlitePool>` — `None` when `with_sqlite()` was not called. Fields are ordered for correct drop sequence: extensions drop before subsystem handles, `sqlite_pool` drops before `log_guard` (so database shutdown logging is captured), and `log_guard` is last so it flushes pending writes after everything else drops.
+`AppContext::config()` returns `&C` — zero-cost after build. `extension::<T>()` returns `Option<&T>` — looks up a type-keyed value registered via `with_extension()` on the builder. `shutdown()` returns `Option<&Shutdown>` — `None` when `with_shutdown()` was not called. `sqlite()` returns `Option<&SqlitePool>` — `None` when `with_sqlite()` was not called. Fields are ordered for correct drop sequence: extensions drop before subsystem handles, `shutdown` drops before `sqlite_pool` (cleanup hooks should run while the pool and logger are still alive), `sqlite_pool` drops before `log_guard` (so database shutdown logging is captured), and `log_guard` is last so it flushes pending writes after everything else drops.
 
 ### Type-State Builder
 
@@ -364,6 +454,8 @@ pub struct AppContextBuilder<Cfg, Async = SyncBuild> {
     logging: Option<LoggingBuilder>,
     #[cfg(feature = "sqlite")]
     sqlite: Option<SqliteBuilder>,
+    #[cfg(feature = "shutdown")]
+    shutdown: Option<ShutdownBuilder>,
 }
 ```
 
@@ -376,29 +468,29 @@ Two type-level dimensions:
 
 **Async requirements** — `SyncBuild` vs `AsyncBuild`:
 - `build_sync()` only exists on `SyncBuild`
-- `with_sqlite()` transitions from `SyncBuild` to `AsyncBuild`, removing `build_sync()` and requiring `build().await` instead
-- If already in `AsyncBuild` (from another async subsystem), `with_sqlite()` stays in `AsyncBuild`
+- `with_sqlite()` and `with_shutdown()` each transition from `SyncBuild` to `AsyncBuild`, removing `build_sync()` and requiring `build().await` instead
+- If already in `AsyncBuild` (from another async subsystem), `with_sqlite()` and `with_shutdown()` stay in `AsyncBuild`
 - `PhantomData<Async>` reserves the parameter with no layout cost
-- `AsyncBuild` is cfg-gated behind `#[cfg(feature = "sqlite")]` — it only exists when at least one async subsystem feature is enabled
+- `AsyncBuild` is cfg-gated behind `#[cfg(feature = "_async")]` — an internal feature activated by any async subsystem (`sqlite` and `shutdown` both activate it)
 
 **SyncBuild → AsyncBuild transition** — `into_async()` is a private helper that centralizes field propagation during state transitions. Without it, every new async subsystem's `with_*()` method on `SyncBuild` would need to manually copy every field from every other subsystem — O(N×M) boilerplate. With `into_async()`, new subsystems add one field to this method instead of editing every other subsystem's transition.
 
-`build_sync()` returns `Result<AppContext<C>, Error>`. `build()` (async) also returns `Result<AppContext<C>, Error>`. Even with no subsystems registered, the signature is fallible — subsystems can fail to initialize, and feature-flag-dependent signatures are confusing. `build()` initializes subsystems in dependency order: logging first (so other subsystems can log during init), then database.
+`build_sync()` returns `Result<AppContext<C>, Error>`. `build()` (async) also returns `Result<AppContext<C>, Error>`. Even with no subsystems registered, the signature is fallible — subsystems can fail to initialize, and feature-flag-dependent signatures are confusing. `build()` initializes subsystems in dependency order: logging first (so other subsystems can log during init), then shutdown, then database.
 
-**Subsystem registration** — `with_logging(LoggingBuilder)`, `with_sqlite(SqliteBuilder)`, and `with_extension(T: Send + Sync + 'static)` are available on all builder states (`NoConfig` and `Configured<C>`) via generic `impl<Cfg, A>` blocks. This lets users register subsystems and extensions before or after providing config. Fields are propagated through state transitions (`builder()` → `with_config()` → `build_sync()` / `build()`). Extensions use a type-map (`HashMap<TypeId, Box<dyn Any + Send + Sync>>`) — if the same type is registered twice, the last value wins.
+**Subsystem registration** — `with_logging(LoggingBuilder)`, `with_sqlite(SqliteBuilder)`, `with_shutdown(ShutdownBuilder)`, and `with_extension(T: Send + Sync + 'static)` are available on all builder states (`NoConfig` and `Configured<C>`) via generic `impl<Cfg, A>` blocks. This lets users register subsystems and extensions before or after providing config. Fields are propagated through state transitions (`builder()` → `with_config()` → `build_sync()` / `build()`). Extensions use a type-map (`HashMap<TypeId, Box<dyn Any + Send + Sync>>`) — if the same type is registered twice, the last value wins.
 
 Marker types (`NoConfig`, `Configured<C>`, `SyncBuild`, `AsyncBuild`) are `pub` with `#[doc(hidden)]` — nameable for compiler error messages, hidden from generated docs. Standard Rust ecosystem convention for type-state markers.
 
-`AppContext` uses a manual `Debug` impl rather than `#[derive(Debug)]` — `WorkerGuard` does not implement `Debug`, so the derive would break. The `log_guard` field is rendered as `"<WorkerGuard>"` in Debug output; `sqlite_pool` renders as `true`/`false`. `AppContextBuilder` also uses a manual Debug impl that shows whether logging and sqlite are configured.
+`AppContext` uses a manual `Debug` impl rather than `#[derive(Debug)]` — `WorkerGuard` does not implement `Debug`, so the derive would break. The `log_guard` field is rendered as `"<WorkerGuard>"` in Debug output; `shutdown` and `sqlite_pool` render as `true`/`false`. `AppContextBuilder` also uses a manual Debug impl that shows whether logging, sqlite, and shutdown are configured.
 
-Two `compile_fail` doc-tests verify type-state enforcement: (1) `AppContext::builder().build_sync()` does not compile without config, and (2) `with_sqlite().build_sync()` does not compile (must use `build().await`).
+Three `compile_fail` doc-tests verify type-state enforcement: (1) `AppContext::builder().build_sync()` does not compile without config, (2) `with_sqlite().build_sync()` does not compile (must use `build().await`), and (3) `with_shutdown().build_sync()` does not compile.
 
 ### Teardown Contract
 
 `AppContext` follows two teardown strategies depending on the subsystem:
 
 - **Sync handles** (e.g., `WorkerGuard` for logging): cleaned up via `Drop`. Rust drops struct fields in declaration order — fields are declared so that dependent handles drop before their dependencies.
-- **Async handles** (e.g., db pool, HTTP server): will require an explicit `ctx.shutdown().await` method, implemented when the shutdown subsystem lands. `Drop` cannot `await`.
+- **Async cleanup** (e.g., database pool, HTTP server): orchestrated via the shutdown subsystem. Users call `ctx.shutdown().unwrap().wait().await` to run registered cleanup hooks within the grace period before dropping the context. The `Drop` impl on `Shutdown` emits a diagnostic warning if hooks were registered but `wait()` was never called.
 
 ---
 
@@ -417,10 +509,16 @@ Three always-on crates, plus optional crates behind feature flags:
 | `flate2` | 1 | Gzip compression for rotated log files | `logging` |
 | `time` | 0.3 (formatting, macros, std) | UTC timestamps for rotated filenames | `logging` |
 | `sqlx` | 0.8 (sqlite, runtime-tokio) | SQLite database pool and migrations | `sqlite` |
+| `tokio` | 1 (signal, rt, time, macros) | Signal handling, async runtime, timeouts | `shutdown` |
+| `tokio-util` | 0.7 (rt) | `CancellationToken` for cooperative shutdown | `shutdown` |
+
+The `_async` internal feature flag (activated by both `sqlite` and `shutdown`) gates the shared `AsyncBuild` scaffolding — `AsyncBuild` marker, `into_async()` helper, and `async fn build()`. The leading underscore signals "internal" — downstream crates must not activate it directly.
 
 Dev dependencies: `tempfile` (filesystem tests), `serial_test` (env-var test serialization), `toml` (integration tests for private-field configs), `tokio` (async test runtime for `#[tokio::test]`).
 
-No CLI parser. Async runtime (`tokio`) is a dev dependency only — library code uses `async`/`.await` language features; `sqlx`'s `runtime-tokio` feature brings in tokio transitively when the `sqlite` feature is enabled.
+No CLI parser. `tokio` is a direct optional dependency behind the `shutdown` feature. `sqlx`'s `runtime-tokio` also brings in tokio transitively when the `sqlite` feature is enabled. Cargo unifies features across the dependency graph, so enabling both results in a single tokio with the union of all requested features.
+
+MSRV: Rust 1.81 — required for `impl Error for Arc<E>` (stabilized in 1.81), used by `ShutdownError::SignalHandler`'s `Arc<io::Error>` source chain.
 
 ---
 
@@ -431,7 +529,7 @@ No CLI parser. Async runtime (`tokio`) is a dev dependency only — library code
 - **Deserialization at build time** — The merged TOML table is deserialized once into `T`. After `build()`, config access is a plain struct field reference.
 - **Explicit error handling** — No panics in library code. All fallible operations return `Result`. All validation deferred to `entries()` for consistent error flow through `build()`.
 - **Compile-time safety** — The AppContext builder uses type-state to enforce that config is provided and async requirements are met. Invalid usage is rejected by the compiler, not at runtime.
-- **Minimal dependency surface** — Three always-on crates plus five optional behind the `logging` feature, all widely used and stable.
+- **Minimal dependency surface** — Three always-on crates plus feature-gated optional crates (five behind `logging`, one behind `sqlite`, two behind `shutdown`), all widely used and stable.
 
 ---
 
