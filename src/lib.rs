@@ -3,6 +3,8 @@ pub mod context;
 mod error;
 #[cfg(feature = "logging")]
 pub mod logging;
+#[cfg(feature = "shutdown")]
+pub mod shutdown;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 

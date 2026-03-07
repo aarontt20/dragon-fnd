@@ -61,6 +61,18 @@ use tracing_appender::non_blocking::WorkerGuard;
 ///     .with_sqlite(SqliteBuilder::new("test.db"))
 ///     .build_sync();
 /// ```
+///
+/// The same applies to `with_shutdown()`:
+///
+/// ```compile_fail
+/// use dragon_fnd::context::AppContext;
+/// use dragon_fnd::shutdown::ShutdownBuilder;
+/// // ERROR: build_sync() is not available on AppContextBuilder<_, AsyncBuild>
+/// let _ctx = AppContext::builder()
+///     .with_config(())
+///     .with_shutdown(ShutdownBuilder::new())
+///     .build_sync();
+/// ```
 pub struct AppContext<C> {
     // Fields ordered for correct drop sequence (Rust drops in declaration order):
     // 1. config — pure data, no cleanup
@@ -70,6 +82,8 @@ pub struct AppContext<C> {
     // 5. log_guard — MUST be last, flushes pending log writes
     config: C,
     extensions: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
+    #[cfg(feature = "shutdown")]
+    shutdown: Option<crate::shutdown::Shutdown>,
     #[cfg(feature = "sqlite")]
     sqlite_pool: Option<sqlx::SqlitePool>,
     #[cfg(feature = "logging")]
@@ -82,6 +96,8 @@ impl<C: std::fmt::Debug> std::fmt::Debug for AppContext<C> {
         let mut s = f.debug_struct("AppContext");
         s.field("config", &self.config);
         s.field("extensions", &self.extensions.len());
+        #[cfg(feature = "shutdown")]
+        s.field("shutdown", &self.shutdown.is_some());
         #[cfg(feature = "sqlite")]
         s.field("sqlite_pool", &self.sqlite_pool.is_some());
         #[cfg(feature = "logging")]
@@ -101,6 +117,14 @@ impl<C> AppContext<C> {
         self.extensions
             .get(&TypeId::of::<T>())
             .and_then(|boxed| boxed.downcast_ref::<T>())
+    }
+
+    /// Returns a reference to the shutdown handle, if one was registered.
+    ///
+    /// Returns `None` if `with_shutdown()` was not called during builder construction.
+    #[cfg(feature = "shutdown")]
+    pub fn shutdown(&self) -> Option<&crate::shutdown::Shutdown> {
+        self.shutdown.as_ref()
     }
 
     /// Returns a reference to the SQLite connection pool, if one was registered.
@@ -123,6 +147,8 @@ impl AppContext<()> {
             logging: None,
             #[cfg(feature = "sqlite")]
             sqlite: None,
+            #[cfg(feature = "shutdown")]
+            shutdown: None,
         }
     }
 }
@@ -142,7 +168,7 @@ pub struct Configured<C>(C);
 pub struct SyncBuild;
 
 /// Marker: at least one async subsystem is registered.
-#[cfg(feature = "sqlite")]
+#[cfg(feature = "_async")]
 #[doc(hidden)]
 pub struct AsyncBuild;
 
@@ -160,6 +186,8 @@ pub struct AppContextBuilder<Cfg, Async = SyncBuild> {
     logging: Option<crate::logging::LoggingBuilder>,
     #[cfg(feature = "sqlite")]
     sqlite: Option<crate::sqlite::SqliteBuilder>,
+    #[cfg(feature = "shutdown")]
+    shutdown: Option<crate::shutdown::ShutdownBuilder>,
 }
 
 impl<Cfg, A> std::fmt::Debug for AppContextBuilder<Cfg, A> {
@@ -170,6 +198,8 @@ impl<Cfg, A> std::fmt::Debug for AppContextBuilder<Cfg, A> {
         s.field("logging", &self.logging.is_some());
         #[cfg(feature = "sqlite")]
         s.field("sqlite", &self.sqlite.is_some());
+        #[cfg(feature = "shutdown")]
+        s.field("shutdown", &self.shutdown.is_some());
         s.finish()
     }
 }
@@ -186,6 +216,8 @@ impl<A> AppContextBuilder<NoConfig, A> {
             logging: self.logging,
             #[cfg(feature = "sqlite")]
             sqlite: self.sqlite,
+            #[cfg(feature = "shutdown")]
+            shutdown: self.shutdown,
         }
     }
 }
@@ -215,7 +247,7 @@ impl<Cfg, A> AppContextBuilder<Cfg, A> {
 
 // -- SyncBuild → AsyncBuild transition --
 
-#[cfg(feature = "sqlite")]
+#[cfg(feature = "_async")]
 impl<Cfg> AppContextBuilder<Cfg, SyncBuild> {
     /// Converts this builder from SyncBuild to AsyncBuild, propagating all fields.
     ///
@@ -228,7 +260,10 @@ impl<Cfg> AppContextBuilder<Cfg, SyncBuild> {
             extensions: self.extensions,
             #[cfg(feature = "logging")]
             logging: self.logging,
+            #[cfg(feature = "sqlite")]
             sqlite: self.sqlite,
+            #[cfg(feature = "shutdown")]
+            shutdown: self.shutdown,
         }
     }
 }
@@ -265,6 +300,38 @@ impl<Cfg> AppContextBuilder<Cfg, AsyncBuild> {
     }
 }
 
+// -- with_shutdown: SyncBuild → AsyncBuild --
+
+#[cfg(feature = "shutdown")]
+impl<Cfg> AppContextBuilder<Cfg, SyncBuild> {
+    /// Registers shutdown handling to be initialized at build time.
+    ///
+    /// Transitions the builder to `AsyncBuild` — `build_sync()` is no longer
+    /// available, and `build().await` must be used instead.
+    pub fn with_shutdown(
+        self,
+        builder: crate::shutdown::ShutdownBuilder,
+    ) -> AppContextBuilder<Cfg, AsyncBuild> {
+        let mut b = self.into_async();
+        b.shutdown = Some(builder);
+        b
+    }
+}
+
+// -- with_shutdown: AsyncBuild → AsyncBuild --
+
+#[cfg(feature = "shutdown")]
+impl<Cfg> AppContextBuilder<Cfg, AsyncBuild> {
+    /// Registers shutdown handling to be initialized at build time.
+    ///
+    /// Available when the builder is already in `AsyncBuild` state (e.g.,
+    /// after registering another async subsystem).
+    pub fn with_shutdown(mut self, builder: crate::shutdown::ShutdownBuilder) -> Self {
+        self.shutdown = Some(builder);
+        self
+    }
+}
+
 // -- build_sync: SyncBuild only --
 
 impl<C> AppContextBuilder<Configured<C>, SyncBuild> {
@@ -284,6 +351,8 @@ impl<C> AppContextBuilder<Configured<C>, SyncBuild> {
         Ok(AppContext {
             config: self.cfg.0,
             extensions: self.extensions,
+            #[cfg(feature = "shutdown")]
+            shutdown: None,
             #[cfg(feature = "sqlite")]
             sqlite_pool: None,
             #[cfg(feature = "logging")]
@@ -294,12 +363,12 @@ impl<C> AppContextBuilder<Configured<C>, SyncBuild> {
 
 // -- build: AsyncBuild only --
 
-#[cfg(feature = "sqlite")]
+#[cfg(feature = "_async")]
 impl<C> AppContextBuilder<Configured<C>, AsyncBuild> {
     /// Builds the application context, initializing all registered subsystems.
     ///
     /// Initializes subsystems in dependency order: logging first (so other
-    /// subsystems can log during init), then database.
+    /// subsystems can log during init), then shutdown, then database.
     ///
     /// Returns an error if any subsystem fails to initialize.
     pub async fn build(self) -> Result<AppContext<C>, Error> {
@@ -310,8 +379,15 @@ impl<C> AppContextBuilder<Configured<C>, AsyncBuild> {
             None => None,
         };
 
+        // Init shutdown (async — requires tokio runtime)
+        // TODO: Replace hardcoded init sequence with topological sort when HTTP subsystem lands
+        #[cfg(feature = "shutdown")]
+        let shutdown = match self.shutdown {
+            Some(builder) => Some(crate::shutdown::init_shutdown(builder)?),
+            None => None,
+        };
+
         // Init sqlite (async)
-        // TODO: Replace hardcoded init sequence with topological sort when 3+ subsystems exist
         #[cfg(feature = "sqlite")]
         let sqlite_pool = match self.sqlite {
             Some(builder) => Some(crate::sqlite::init_pool(&builder.into_config()).await?),
@@ -321,6 +397,8 @@ impl<C> AppContextBuilder<Configured<C>, AsyncBuild> {
         Ok(AppContext {
             config: self.cfg.0,
             extensions: self.extensions,
+            #[cfg(feature = "shutdown")]
+            shutdown,
             #[cfg(feature = "sqlite")]
             sqlite_pool,
             #[cfg(feature = "logging")]
