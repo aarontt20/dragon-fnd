@@ -6,8 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - `docs/DESIGN.md` — How the built system works (architecture, current state)
 - `docs/VISION.md` — Where the project is going (planned subsystems, design philosophy)
-- `DOC.md` — API documentation
-- `TEST.md` — Test coverage documentation (175 unit + 50 integration + 4 doc-tests with all features)
+- `docs/DOC.md` — API documentation
+- `docs/TESTS.md` — Test coverage documentation (175 unit + 50 integration + 4 doc-tests with all features)
 
 ## Build Commands
 
