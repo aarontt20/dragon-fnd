@@ -88,7 +88,7 @@ impl Shutdown {
         // concurrent `register_cleanup` call either completes its push
         // before we cancel (and the hook will be drained by `run_shutdown`),
         // or sees `is_cancelled() == true` after we release the lock.
-        let _guard = self.inner.hooks.lock().unwrap_or_else(|e| e.into_inner());
+        let _hooks_guard = self.inner.hooks.lock().unwrap_or_else(|e| e.into_inner());
         self.inner.token.cancel();
     }
 
@@ -125,7 +125,9 @@ impl Shutdown {
 
     /// Wait for shutdown to complete (signal + all cleanup hooks).
     ///
-    /// Returns when cleanup finishes or the grace period expires.
+    /// Returns `Ok(())` when all hooks complete within the grace period.
+    /// Individual hook panics are logged but do not fail the overall result —
+    /// `Ok(())` means "shutdown completed in time", not "all cleanup succeeded."
     /// All callers receive the same result — the outcome is stored and shared.
     ///
     /// # Cancellation Safety
@@ -210,6 +212,10 @@ impl Shutdown {
                                 panicked.push(name);
                             }
                             Err(_) => {
+                                // Task cancellation — should not occur since we
+                                // don't abort spawned hooks, but handle defensively.
+                                // Grouped with panicked for simplicity; both represent
+                                // hooks that ran but did not complete successfully.
                                 #[cfg(feature = "logging")]
                                 tracing::warn!("cleanup hook '{name}' was cancelled");
                                 #[cfg(not(feature = "logging"))]
@@ -529,7 +535,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn panicked_hook_tracked_separately() {
+    async fn hooks_within_grace_period_with_panic_returns_ok() {
         let shutdown = init_shutdown(test_builder()).unwrap();
 
         shutdown
@@ -543,8 +549,50 @@ mod tests {
 
         shutdown.trigger();
         let result = shutdown.wait().await;
-        // All hooks completed (or panicked) within grace period — Ok
+        // All hooks completed (or panicked) within grace period — Ok.
+        // Per-hook panics are logged but do not fail wait().
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn panicked_then_timeout_tracks_both() {
+        let shutdown =
+            init_shutdown(ShutdownBuilder::new().grace_period(Duration::from_millis(50))).unwrap();
+
+        // Registration order: fast, slow, panicker
+        // Reverse execution order: panicker (panics), slow (blocks), fast (never reached)
+        shutdown
+            .register_cleanup("fast", || async {})
+            .unwrap();
+        shutdown
+            .register_cleanup("slow", || async {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            })
+            .unwrap();
+        shutdown
+            .register_cleanup("panicker", || async {
+                panic!("boom");
+            })
+            .unwrap();
+
+        shutdown.trigger();
+        let result = shutdown.wait().await;
+        let err = result.unwrap_err();
+
+        match err {
+            ShutdownError::GracePeriodExceeded {
+                completed,
+                panicked,
+                remaining,
+                ..
+            } => {
+                // panicker ran and panicked, slow started and timed out, fast never ran
+                assert!(completed.is_empty());
+                assert_eq!(panicked, vec!["panicker"]);
+                assert_eq!(remaining, vec!["slow", "fast"]);
+            }
+            other => panic!("expected GracePeriodExceeded, got: {other:?}"),
+        }
     }
 
     #[tokio::test]
