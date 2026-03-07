@@ -38,9 +38,8 @@ impl std::fmt::Debug for Shutdown {
                     .inner
                     .hooks
                     .lock()
-                    .ok()
-                    .map(|h| h.len())
-                    .unwrap_or(0),
+                    .unwrap_or_else(|e| e.into_inner())
+                    .len(),
             )
             .field("grace_period", &self.inner.grace_period)
             .finish()
@@ -179,9 +178,9 @@ impl Shutdown {
         // Drain hooks under the lock, release immediately
         let hooks: Vec<(String, BoxedCleanupHook)> = {
             let mut guard = inner.hooks.lock().unwrap_or_else(|e| e.into_inner());
-            let mut drained: Vec<_> = guard.drain(..).collect();
-            drained.reverse();
-            drained
+            let mut taken = std::mem::take(&mut *guard);
+            taken.reverse();
+            taken
         };
 
         if hooks.is_empty() {
@@ -193,6 +192,8 @@ impl Shutdown {
         let mut panicked = Vec::new();
         let start = Instant::now();
 
+        // Sequential execution is load-bearing: the mutable captures of
+        // `completed` and `panicked` depend on one-at-a-time hook processing.
         let cleanup = async {
             for (name, hook) in hooks {
                 // catch_unwind on the closure call (synchronous panic in hook creation)
