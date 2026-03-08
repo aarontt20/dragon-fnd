@@ -60,6 +60,7 @@ async fn bind_failure() {
 
     let port = first.http().unwrap().local_addr().port();
 
+    // `first` must remain alive to hold the port open; dropping it would release the listener.
     // Try to bind to the same port
     let result = AppContext::builder()
         .with_config(())
@@ -205,12 +206,16 @@ async fn serve_with_router_and_programmatic_shutdown() {
         ctx_clone.http().unwrap().serve(router).await
     });
 
-    // Give the server a moment to start accepting connections
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-    // Make a request to verify it's serving
-    let client = tokio::net::TcpStream::connect(addr).await;
-    assert!(client.is_ok(), "should be able to connect to the server");
+    // Wait for the server to start accepting connections
+    let mut connected = false;
+    for _ in 0..20 {
+        if tokio::net::TcpStream::connect(addr).await.is_ok() {
+            connected = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(connected, "server never became ready");
 
     // Trigger shutdown
     ctx.shutdown().unwrap().trigger();

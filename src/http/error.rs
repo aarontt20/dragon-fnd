@@ -22,7 +22,7 @@ pub enum HttpError {
     ShutdownRequired,
 
     /// The axum server returned an error.
-    #[error("server error")]
+    #[error("HTTP server error")]
     ServeFailed {
         #[source]
         source: io::Error,
@@ -80,7 +80,7 @@ mod tests {
         let err = HttpError::ServeFailed {
             source: io::Error::new(io::ErrorKind::Other, "connection reset"),
         };
-        assert_eq!(err.to_string(), "server error");
+        assert_eq!(err.to_string(), "HTTP server error");
         assert!(err.source().is_some());
     }
 

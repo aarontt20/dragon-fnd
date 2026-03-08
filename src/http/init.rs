@@ -89,7 +89,7 @@ impl Http {
         let listener = self
             .listener
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .map_err(|_| HttpError::AlreadyServing)?
             .take()
             .ok_or(HttpError::AlreadyServing)?;
 
