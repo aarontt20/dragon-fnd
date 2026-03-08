@@ -5,6 +5,8 @@ mod error;
 pub mod logging;
 #[cfg(feature = "shutdown")]
 pub mod shutdown;
+#[cfg(feature = "http")]
+pub mod http;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 

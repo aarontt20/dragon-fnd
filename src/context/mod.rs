@@ -77,12 +77,14 @@ pub struct AppContext<C> {
     // Fields ordered for correct drop sequence (Rust drops in declaration order):
     // 1. config — pure data, no cleanup
     // 2. extensions — user-provided, drop before subsystems
-    // 3. [future: http_handle] — drop server before database
+    // 3. http — unbinds port before shutdown runs cleanup hooks
     // 4. shutdown — run cleanup hooks while pool/logger are still alive
     // 5. sqlite_pool — close database connections (logging during drop is captured)
     // 6. log_guard — MUST be last, flushes pending log writes
     config: C,
     extensions: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
+    #[cfg(feature = "http")]
+    http: Option<crate::http::Http>,
     #[cfg(feature = "shutdown")]
     shutdown: Option<crate::shutdown::Shutdown>,
     #[cfg(feature = "sqlite")]
@@ -97,6 +99,8 @@ impl<C: std::fmt::Debug> std::fmt::Debug for AppContext<C> {
         let mut s = f.debug_struct("AppContext");
         s.field("config", &self.config);
         s.field("extensions", &self.extensions.len());
+        #[cfg(feature = "http")]
+        s.field("http", &self.http.is_some());
         #[cfg(feature = "shutdown")]
         s.field("shutdown", &self.shutdown.is_some());
         #[cfg(feature = "sqlite")]
@@ -118,6 +122,14 @@ impl<C> AppContext<C> {
         self.extensions
             .get(&TypeId::of::<T>())
             .and_then(|boxed| boxed.downcast_ref::<T>())
+    }
+
+    /// Returns a reference to the HTTP handle, if one was registered.
+    ///
+    /// Returns `None` if `with_http()` was not called during builder construction.
+    #[cfg(feature = "http")]
+    pub fn http(&self) -> Option<&crate::http::Http> {
+        self.http.as_ref()
     }
 
     /// Returns a reference to the shutdown handle, if one was registered.
@@ -146,6 +158,8 @@ impl AppContext<()> {
             extensions: HashMap::new(),
             #[cfg(feature = "logging")]
             logging: None,
+            #[cfg(feature = "http")]
+            http: None,
             #[cfg(feature = "sqlite")]
             sqlite: None,
             #[cfg(feature = "shutdown")]
@@ -185,6 +199,8 @@ pub struct AppContextBuilder<Cfg, Async = SyncBuild> {
     extensions: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
     #[cfg(feature = "logging")]
     logging: Option<crate::logging::LoggingBuilder>,
+    #[cfg(feature = "http")]
+    http: Option<crate::http::HttpBuilder>,
     #[cfg(feature = "sqlite")]
     sqlite: Option<crate::sqlite::SqliteBuilder>,
     #[cfg(feature = "shutdown")]
@@ -197,6 +213,8 @@ impl<Cfg, A> std::fmt::Debug for AppContextBuilder<Cfg, A> {
         s.field("extensions", &self.extensions.len());
         #[cfg(feature = "logging")]
         s.field("logging", &self.logging.is_some());
+        #[cfg(feature = "http")]
+        s.field("http", &self.http.is_some());
         #[cfg(feature = "sqlite")]
         s.field("sqlite", &self.sqlite.is_some());
         #[cfg(feature = "shutdown")]
@@ -215,6 +233,8 @@ impl<A> AppContextBuilder<NoConfig, A> {
             extensions: self.extensions,
             #[cfg(feature = "logging")]
             logging: self.logging,
+            #[cfg(feature = "http")]
+            http: self.http,
             #[cfg(feature = "sqlite")]
             sqlite: self.sqlite,
             #[cfg(feature = "shutdown")]
@@ -261,6 +281,8 @@ impl<Cfg> AppContextBuilder<Cfg, SyncBuild> {
             extensions: self.extensions,
             #[cfg(feature = "logging")]
             logging: self.logging,
+            #[cfg(feature = "http")]
+            http: self.http,
             #[cfg(feature = "sqlite")]
             sqlite: self.sqlite,
             #[cfg(feature = "shutdown")]
@@ -333,6 +355,38 @@ impl<Cfg> AppContextBuilder<Cfg, AsyncBuild> {
     }
 }
 
+// -- with_http: SyncBuild → AsyncBuild --
+
+#[cfg(feature = "http")]
+impl<Cfg> AppContextBuilder<Cfg, SyncBuild> {
+    /// Registers an HTTP server to be initialized at build time.
+    ///
+    /// Transitions the builder to `AsyncBuild` — `build_sync()` is no longer
+    /// available, and `build().await` must be used instead.
+    pub fn with_http(
+        self,
+        builder: crate::http::HttpBuilder,
+    ) -> AppContextBuilder<Cfg, AsyncBuild> {
+        let mut b = self.into_async();
+        b.http = Some(builder);
+        b
+    }
+}
+
+// -- with_http: AsyncBuild → AsyncBuild --
+
+#[cfg(feature = "http")]
+impl<Cfg> AppContextBuilder<Cfg, AsyncBuild> {
+    /// Registers an HTTP server to be initialized at build time.
+    ///
+    /// Available when the builder is already in `AsyncBuild` state (e.g.,
+    /// after registering another async subsystem).
+    pub fn with_http(mut self, builder: crate::http::HttpBuilder) -> Self {
+        self.http = Some(builder);
+        self
+    }
+}
+
 // -- build_sync: SyncBuild only --
 
 impl<C> AppContextBuilder<Configured<C>, SyncBuild> {
@@ -352,6 +406,8 @@ impl<C> AppContextBuilder<Configured<C>, SyncBuild> {
         Ok(AppContext {
             config: self.cfg.0,
             extensions: self.extensions,
+            #[cfg(feature = "http")]
+            http: None,
             #[cfg(feature = "shutdown")]
             shutdown: None,
             #[cfg(feature = "sqlite")]
@@ -369,7 +425,7 @@ impl<C> AppContextBuilder<Configured<C>, AsyncBuild> {
     /// Builds the application context, initializing all registered subsystems.
     ///
     /// Initializes subsystems in dependency order: logging first (so other
-    /// subsystems can log during init), then shutdown, then database.
+    /// subsystems can log during init), then shutdown, then HTTP, then database.
     ///
     /// Returns an error if any subsystem fails to initialize.
     pub async fn build(self) -> Result<AppContext<C>, Error> {
@@ -381,10 +437,22 @@ impl<C> AppContextBuilder<Configured<C>, AsyncBuild> {
         };
 
         // Init shutdown (async — requires tokio runtime)
-        // TODO: Replace hardcoded init sequence with topological sort when HTTP subsystem lands
         #[cfg(feature = "shutdown")]
         let shutdown = match self.shutdown {
             Some(builder) => Some(crate::shutdown::init_shutdown(builder)?),
+            None => None,
+        };
+
+        // Init HTTP (async — requires shutdown token)
+        #[cfg(feature = "http")]
+        let http = match self.http {
+            Some(builder) => {
+                let token = shutdown
+                    .as_ref()
+                    .ok_or(crate::http::HttpError::ShutdownRequired)?
+                    .token();
+                Some(crate::http::init_http(&builder.into_config(), token).await?)
+            }
             None => None,
         };
 
@@ -398,6 +466,8 @@ impl<C> AppContextBuilder<Configured<C>, AsyncBuild> {
         Ok(AppContext {
             config: self.cfg.0,
             extensions: self.extensions,
+            #[cfg(feature = "http")]
+            http,
             #[cfg(feature = "shutdown")]
             shutdown,
             #[cfg(feature = "sqlite")]

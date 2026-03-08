@@ -10,7 +10,7 @@ logging = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-appender", "dep
 _async = []  # internal — activated by any async subsystem
 sqlite = ["dep:sqlx", "_async"]
 shutdown = ["dep:tokio", "dep:tokio-util", "_async"]
-# http = ["dep:axum", "dep:tokio"]
+http = ["dep:axum", "shutdown"]
 # fs = []
 
 [dependencies]
@@ -25,6 +25,7 @@ time = { version = "0.3", features = ["formatting", "macros", "std"], optional =
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"], optional = true }
 tokio = { version = "1", features = ["signal", "rt", "time", "macros"], optional = true }
 tokio-util = { version = "0.7", features = ["rt"], optional = true }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"
