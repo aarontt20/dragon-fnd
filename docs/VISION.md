@@ -35,7 +35,6 @@ Each subsystem lives behind its own feature flag. You only pay for what you use 
 | CLI Args (`SerdeSource`) | *(always on)* | Config | Built |
 | Logging | `logging` | Config | Built |
 | SQLite | `sqlite` | Config | Built |
-| FS Storage | `fs` | Config | Planned |
 | Graceful Shutdown | `shutdown` | — | Built |
 | HTTP | `http` | Shutdown | Built |
 
@@ -73,11 +72,11 @@ The library's central architectural insight: **"I have a bag of things with inte
 
 **Scale 1 — Config values.** String values reference other string values via `${path.to.field}`. The resolution system collects all references, builds a dependency graph, topological-sorts it, and resolves in order. This is built today (`src/config/resolve.rs`).
 
-**Scale 2 — Subsystem initialization.** Subsystems depend on other subsystems (logging needs config, database needs config, HTTP needs config + shutdown). The builder will collect registered subsystems, build a dependency graph from declared dependencies, topological-sort it, and initialize in order.
+**Scale 2 — Subsystem initialization.** Originally envisioned as graph-based, but deliberately implemented as hardcoded order (logging → shutdown → HTTP → SQLite). The subsystem count is small, the edges are few and stable, and a dependency graph adds complexity without justification at this scale.
 
-**Scale 3 — Shutdown teardown.** Cleanup must happen in reverse dependency order — the HTTP server shuts down before the database pool closes, the database pool closes before the logger flushes. This is the same graph, walked backwards.
+**Scale 3 — Shutdown teardown.** Cleanup ordering is handled by Rust's drop order (struct fields drop in declaration order) and the shutdown subsystem's reverse-order hook execution. A formal graph is not needed.
 
-All three scales use the same algorithm. If the topological sort implementation in `resolve.rs` proves reusable (or worth extracting into a shared utility), the library has one dependency resolution engine powering config, initialization, and teardown. This is not accidental — it reflects the fundamental nature of the problem dragon-fnd solves: managing a graph of interdependent subsystems.
+The graph-based pattern proved valuable at the config-value scale where the number of nodes and edges is unbounded and user-defined. At the subsystem scale, the dependencies are author-defined and small — hardcoded order is simpler and correct.
 
 ---
 
@@ -85,15 +84,15 @@ All three scales use the same algorithm. If the topological sort implementation 
 
 The old version (dragon-fnd-old) built all planned subsystems: config with file discovery, environment overlay, and CLI args; logging with tracing and file rotation; database with sqlx; HTTP with axum and graceful shutdown. It worked, but it had structural problems that this rewrite addresses:
 
-**Panicking APIs.** `ctx.database()` and `ctx.http_config()` panicked if the subsystem was not enabled. Library code should never panic. The rewrite will ensure every accessor returns `Result` or `Option`.
+**Panicking APIs.** `ctx.database()` and `ctx.http_config()` panicked if the subsystem was not enabled. Library code should never panic. The rewrite ensures every accessor returns `Result` or `Option`. **Resolved.**
 
-**Silent failures.** Missing environment-specific config files produced no warning. CLI path navigation failed silently. Unclosed `${` braces were treated as literal text. The rewrite uses graph-based resolution with explicit errors for every failure mode.
+**Silent failures.** Missing environment-specific config files produced no warning. CLI path navigation failed silently. Unclosed `${` braces were treated as literal text. The rewrite uses graph-based resolution with explicit errors for every failure mode. **Resolved.**
 
-**Rigid initialization order.** The old builder used type-state to enforce async requirements (good), but hardcoded the initialization sequence inside `build()` (bad). Adding a subsystem meant manually wiring it into the correct position. The rewrite will separate these concerns: type-state for async enforcement, dependency graph for initialization order.
+**Rigid initialization order.** The old builder used type-state to enforce async requirements (good), but hardcoded the initialization sequence inside `build()` (bad). The rewrite keeps hardcoded initialization order as a deliberate choice — the subsystem count is small (4), the dependency edges are few and stable, and a graph adds complexity without justification. Type-state enforces the async/sync boundary; the builder validates inter-subsystem requirements at runtime. **Resolved — hardcoded order accepted.**
 
-**Library owning CLI args.** The old `.with_args::<A>()` called `A::parse()` internally and stored the result in a type-erased `Any`. This forced the library to depend on clap, own the parsing, and prescribe the args pattern. The rewrite keeps args as a user concern: parse however you want, wrap the result in a `ConfigSource`, and hand it to the builder.
+**Library owning CLI args.** The old `.with_args::<A>()` called `A::parse()` internally and stored the result in a type-erased `Any`. This forced the library to depend on clap, own the parsing, and prescribe the args pattern. The rewrite keeps args as a user concern via `SerdeSource`. **Resolved.**
 
-These are not just bugs to fix — they are design constraints for the rewrite. Every subsystem will be evaluated against them.
+These lessons became the design constraints in CLAUDE.md. All four have been addressed.
 
 ---
 
@@ -105,35 +104,11 @@ Two compile-time dimensions:
 
 **1. Async requirement.** The builder tracks whether any registered subsystem needs an async runtime. Enabling `sqlite` or `http` transitions the builder to an `AsyncBuild` state. `build_sync()` is only available when no async subsystem is registered. `build()` (async) is always available. This is enforced by the type system — calling `build_sync()` on a builder with database enabled does not compile.
 
-**2. Subsystem availability.** The built `AppContext` should expose accessors only for subsystems that were registered. If you didn't register a database, `ctx.database()` should not exist on the type — not panic, not return `Option`, but literally not be a method. Whether this is achievable via trait bounds, associated types, or a pragmatic `Option`-based fallback is an open design question to be resolved when the second subsystem lands.
+**2. Subsystem availability.** Resolved with the `Option`-based approach — each accessor returns `Option<&T>`, returning `None` when the subsystem was not registered. The type-state alternative (making unregistered accessors not compile) was rejected: adding a type-state axis per subsystem would cause exponential type complexity and wasn't worth the ergonomic cost. `Option` is idiomatic and matches the library's no-panic constraint.
 
-### Dependency Resolution at Build Time
+Subsystem initialization order is hardcoded in `build()`: logging → shutdown → HTTP → SQLite. See DESIGN.md for the rationale. Inter-subsystem requirements (e.g., HTTP requires shutdown) are validated at runtime during `build()`.
 
-When `build()` is called, the builder holds a set of registered subsystem intents. Instead of hardcoding initialization order:
-
-1. Each subsystem declares its dependencies (logging needs config, database needs config, HTTP needs config + shutdown)
-2. `build()` topological-sorts the dependency graph
-3. Subsystems initialize in resolved order
-4. Missing required dependencies produce a clear error (e.g., HTTP registered without shutdown)
-
-This mirrors the graph-based approach already used in variable resolution — the same pattern applied at the subsystem level.
-
-### Usage Shape
-
-```rust
-let ctx = AppContext::builder()
-    .with_logging(LoggingBuilder::from_config(config.logging))  // feature: "logging"
-    .with_config(config)        // always available
-    .with_database("app.db")    // feature: "sqlite" (planned)
-    .with_shutdown()             // feature: "shutdown" (planned)
-    .build()                     // async, because sqlite requires it
-    .await?;
-
-ctx.config();     // &MyConfig — always available
-ctx.database();   // &Pool — only available because with_database() was called
-```
-
-Note: `with_logging()` is available on all builder states (before or after `with_config()`). Logging initialization happens inside `build_sync()` / `build()`, not at registration time.
+See DESIGN.md for the full AppContext and builder documentation.
 
 ---
 
@@ -172,22 +147,6 @@ Future extensions: additional output sinks (network, syslog).
 **Feature:** `sqlite` — See [DESIGN.md](DESIGN.md) for full details.
 
 Future extensions: connection pool metrics, additional database-level PRAGMAs, explicit async shutdown via the shutdown subsystem (`pool.close().await` before drop).
-
----
-
-## FS Storage Subsystem
-
-**Feature:** `fs`
-
-Managed directory structures for applications that need organized file storage. Reads a base directory and optional subdirectory layout from config. Provides path resolution and directory creation.
-
-Use cases:
-- An archiver's download tree (`{base}/downloads/{site}/{artist}/`)
-- Cache directories (`{base}/cache/`)
-- Log directories (`{base}/logs/`)
-- Temporary staging areas
-
-The subsystem manages paths and directories — it does not manage file contents. It ensures directories exist, provides resolved paths, and handles cleanup if configured. The application decides what to write and where.
 
 ---
 
