@@ -12,7 +12,9 @@ The logging subsystem is complete: structured logging via `tracing` with console
 
 The SQLite subsystem is complete: database pool initialization and lifecycle via `sqlx` behind the `sqlite` feature. Configurable PRAGMAs (WAL journal mode, foreign keys, busy timeout), filesystem-based runtime migrations, connectivity testing at init, and parent directory creation for file-based databases. `SqliteBuilder` provides a fluent API; `SqliteConfig` provides serde-deserializable config. SQLite is the first async subsystem — `with_sqlite()` transitions the builder to `AsyncBuild`, requiring `build().await` instead of `build_sync()`. See DESIGN.md for full details.
 
-The graceful shutdown subsystem is complete: signal handling (SIGTERM/SIGINT on Unix, Ctrl+C elsewhere), `CancellationToken` distribution for cooperative shutdown, cleanup hooks with reverse-order execution, and grace period enforcement. `ShutdownBuilder` provides a fluent API. Shutdown is the second async subsystem — `with_shutdown()` also transitions to `AsyncBuild`. See DESIGN.md for full details. What follows is everything that's still ahead.
+The graceful shutdown subsystem is complete: signal handling (SIGTERM/SIGINT on Unix, Ctrl+C elsewhere), `CancellationToken` distribution for cooperative shutdown, cleanup hooks with reverse-order execution, and grace period enforcement. `ShutdownBuilder` provides a fluent API. Shutdown is the second async subsystem — `with_shutdown()` also transitions to `AsyncBuild`. See DESIGN.md for full details.
+
+The HTTP subsystem is complete: axum server lifecycle management behind the `http` feature (which implies `shutdown`). TCP listener binding at build time, `serve()` with graceful shutdown via `CancellationToken`, and `local_addr()` for address inspection. `HttpBuilder` provides a fluent API; `HttpConfig` provides serde-deserializable config. The library manages binding, serving, and shutdown; the user owns routing, middleware, and handlers. See DESIGN.md for full details. What follows is everything that's still ahead.
 
 ---
 
@@ -35,7 +37,7 @@ Each subsystem lives behind its own feature flag. You only pay for what you use 
 | SQLite | `sqlite` | Config | Built |
 | FS Storage | `fs` | Config | Planned |
 | Graceful Shutdown | `shutdown` | — | Built |
-| HTTP | `http` | Config, Shutdown | Planned |
+| HTTP | `http` | Shutdown | Built |
 
 ---
 
@@ -197,23 +199,11 @@ Future extensions: trait boundary for custom trigger sources (when a second trig
 
 ---
 
-## HTTP Subsystem
+## HTTP Subsystem — Built
 
-**Feature:** `http`
+**Feature:** `http` — See [DESIGN.md](DESIGN.md) for full details.
 
-Axum server lifecycle management. Reads bind address, port, and graceful shutdown timeout from config. Integrates with the shutdown subsystem for coordinated teardown.
-
-The library provides:
-- TCP listener binding from config
-- Graceful shutdown wired to the shutdown subsystem's signal
-- A `serve()` function that takes an axum `Router`
-
-The library does not provide:
-- Routing (the user builds their `Router`)
-- Middleware (the user composes their middleware stack)
-- Request/response types (the user defines their handlers)
-
-The library manages the server's lifecycle — startup, readiness, and graceful shutdown. The user owns everything that happens between request and response.
+Future extensions: additional listener tuning fields (TCP keepalive, SO_REUSEADDR, backlog), `from_listener(TcpListener)` constructor for pre-bound listeners.
 
 ---
 

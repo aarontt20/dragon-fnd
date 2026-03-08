@@ -16,6 +16,7 @@ All subsystems are feature-gated. You only pay for what you enable.
 | `logging` | Tracing subscriber setup with console/file output, size-based rotation, compression, retention |
 | `sqlite` | SQLite connection pool via sqlx with PRAGMA configuration and migrations |
 | `shutdown` | Graceful shutdown with signal handling, cancellation tokens, and cleanup hooks |
+| `http` | Axum server lifecycle management with TCP binding and graceful shutdown (implies `shutdown`) |
 
 ## Usage
 
@@ -25,7 +26,7 @@ Add to `Cargo.toml`:
 [dependencies]
 dragon-fnd = { path = "../dragon-fnd" }
 # or with features:
-dragon-fnd = { path = "../dragon-fnd", features = ["logging", "sqlite", "shutdown"] }
+dragon-fnd = { path = "../dragon-fnd", features = ["logging", "sqlite", "http"] }
 ```
 
 ### Config loading
@@ -106,6 +107,33 @@ shutdown.register_cleanup("cache-flush", move || async move {
 shutdown.wait().await?;
 ```
 
+With HTTP server (requires `http` feature, which implies `shutdown`):
+
+```rust
+use dragon_fnd::http::HttpBuilder;
+use dragon_fnd::shutdown::ShutdownBuilder;
+use std::sync::Arc;
+
+let ctx = Arc::new(
+    AppContext::builder()
+        .with_config(config)
+        .with_shutdown(ShutdownBuilder::new())
+        .with_http(HttpBuilder::new().port(0))
+        .build()
+        .await?
+);
+
+let router = axum::Router::new()
+    .route("/health", axum::routing::get(|| async { "ok" }));
+
+if let Some(http) = ctx.http() {
+    http.serve(router).await?;
+}
+if let Some(shutdown) = ctx.shutdown() {
+    shutdown.wait().await?;
+}
+```
+
 ### Custom config sources
 
 ```rust
@@ -135,6 +163,7 @@ cargo test                                        # Run base tests
 cargo test --features logging                     # Include logging tests
 cargo test --features sqlite                      # Include sqlite tests
 cargo test --features shutdown                    # Include shutdown tests
-cargo test --features shutdown,sqlite,logging     # Run all tests
+cargo test --features http                        # Include http tests (implies shutdown)
+cargo test --features http,sqlite,logging         # Run all tests
 cargo clippy                                      # Lint
 ```

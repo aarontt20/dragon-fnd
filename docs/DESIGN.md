@@ -6,7 +6,7 @@ This document describes dragon-fnd as it exists in code today. For future plans 
 
 ## What It Does
 
-dragon-fnd is a foundation library for Rust applications that provides typed configuration loading from multiple sources (TOML files, environment variables, custom sources) with deep merge semantics, graph-based variable reference resolution, and a type-state application context builder. It ships as a single crate with feature-gated subsystems — currently config (always on), logging (`logging` feature), SQLite database (`sqlite` feature), and graceful shutdown (`shutdown` feature). The library does not own `main()` and does not prescribe application structure.
+dragon-fnd is a foundation library for Rust applications that provides typed configuration loading from multiple sources (TOML files, environment variables, custom sources) with deep merge semantics, graph-based variable reference resolution, and a type-state application context builder. It ships as a single crate with feature-gated subsystems — currently config (always on), logging (`logging` feature), SQLite database (`sqlite` feature), graceful shutdown (`shutdown` feature), and HTTP server lifecycle (`http` feature). The library does not own `main()` and does not prescribe application structure.
 
 ---
 
@@ -45,11 +45,17 @@ src/
 │   ├── init.rs            # Shutdown struct, init_shutdown(), cleanup orchestration
 │   ├── signal.rs          # Platform-aware signal handling (SIGTERM/SIGINT on Unix, Ctrl+C elsewhere)
 │   └── error.rs           # ShutdownError enum (3 variants, Clone)
+├── http/                  # Feature: "http" (implies shutdown)
+│   ├── mod.rs             # Re-exports, pub(crate) init_http
+│   ├── config.rs          # HttpConfig (serde, private fields, host + port)
+│   ├── builder.rs         # HttpBuilder (fluent API, Debug, Clone, Default, #[must_use])
+│   ├── init.rs            # Http struct, init_http(), serve()
+│   └── error.rs           # HttpError enum (4 variants)
 └── context/
     └── mod.rs             # AppContext<C> with type-state AppContextBuilder, extension slot
 ```
 
-28 source files. Tests are inline (`#[cfg(test)]` modules) plus integration tests in `tests/`.
+33 source files. Tests are inline (`#[cfg(test)]` modules) plus integration tests in `tests/`.
 
 ---
 
@@ -383,6 +389,66 @@ Signal handlers are installed eagerly in `init_shutdown()`, not deferred to `wai
 
 ---
 
+## HTTP System
+
+**Feature:** `http` — opt-in via `Cargo.toml`. Implies `shutdown`.
+
+Axum server lifecycle management — TCP listener binding, serving, and graceful shutdown. The subsystem binds a TCP listener at build time, stores the handle in `AppContext`, and provides a `serve()` method that runs until the shutdown subsystem's cancellation token fires. The library owns the lifecycle; the user owns everything between request and response (routing, middleware, handlers).
+
+### Architecture Decision: No Trait Boundary
+
+The HTTP subsystem does not define its own trait. `axum` is the Rust ecosystem's dominant HTTP framework — analogous to `tracing` for logging. Adding a library-level trait on top of axum's `serve()` would add indirection with no real value. Users who want a different HTTP server (hyper directly, warp, etc.) skip the `http` feature and wire their own server using `ctx.shutdown().unwrap().token()` directly via `with_extension()`. This is the fourth explicit exception to CLAUDE.md Constraint 4 (after logging, SQLite, and shutdown).
+
+### Architecture Decision: Bind at Build Time
+
+The TCP listener is bound during `build().await`, consistent with how SQLite creates the pool and shutdown installs signal handlers at build time. Port-in-use is a build error, not a serve error. The bound address is available immediately via `ctx.http().unwrap().local_addr()`.
+
+### Architecture Decision: Hardcoded Init Order
+
+Subsystem initialization order is hardcoded in `build()`: logging → shutdown → HTTP → SQLite. The order is small (4 subsystems), readable, and easy to verify. VISION.md describes graph-based dependency resolution as a pattern at the config-value scale (where it's built), but at the subsystem scale the graph adds complexity that isn't justified — the dependency edges are few, stable, and obvious.
+
+### Config Types (`src/http/config.rs`)
+
+Serde-deserializable types for TOML configuration:
+
+- `HttpConfig` — `host` (default `"0.0.0.0"`) and `port` (default `8080`). Both fields are `pub(crate)` — accessed through `HttpBuilder`, not direct field mutation. Uses `#[serde(default)]` and a manual `Default` impl. `addr_string()` is a `pub(crate)` helper returning `"{host}:{port}"`.
+
+### Builder Type (`src/http/builder.rs`)
+
+`HttpBuilder` wraps `HttpConfig` — no field duplication:
+
+- `#[must_use]` attribute, `Debug`, `Clone`, `Default`
+- `new()` — defaults to `0.0.0.0:8080`
+- `from_config(HttpConfig)` — bridge from deserialized TOML
+- Fluent setters: `host()`, `port()`
+- `into_config()` is `pub(crate)` — consumed by `build()`
+
+### HTTP Handle (`src/http/init.rs`)
+
+`Http` stores a `Mutex<Option<TcpListener>>`, a `SocketAddr`, and a `CancellationToken`. Two public methods:
+
+- `local_addr() -> SocketAddr` — returns the address bound at build time, regardless of whether `serve()` has been called or returned
+- `serve(router: axum::Router) -> Result<(), HttpError>` — takes `&self`, extracts the listener via `Mutex::lock()` + `Option::take()`, and runs `axum::serve(listener, router).with_graceful_shutdown(token.cancelled_owned())`. Returns `HttpError::AlreadyServing` if called more than once
+
+The `Mutex<Option<TcpListener>>` pattern enables `serve()` to take `&self` — critical because `AppContext` is typically behind `Arc` (standard axum state pattern). The mutex uses poison recovery via `unwrap_or_else(|e| e.into_inner())` — the `Option<TcpListener>` data is valid regardless of whether a previous lock holder panicked. `cancelled_owned()` rather than `cancelled()` because axum's `with_graceful_shutdown` requires `F: Future<Output = ()> + Send + 'static`.
+
+`init_http` is `pub(crate) async fn` — binds `TcpListener` to the config address, captures `local_addr()`, wraps in the `Http` handle. Mapping `local_addr()` failure to `BindFailed` since it's part of the bind process.
+
+### Error Types (`src/http/error.rs`)
+
+`HttpError` — 4 variants, `#[non_exhaustive]`:
+
+| Variant | Meaning |
+|---------|---------|
+| `BindFailed { addr, source }` | TCP listener failed to bind to the configured address |
+| `AlreadyServing` | `serve()` has already been called — it may only be called once |
+| `ShutdownRequired` | HTTP was registered but shutdown was not |
+| `ServeFailed { source }` | The axum server returned an error |
+
+`HttpError` does not derive `Clone` — unlike `ShutdownError`, there is no result-sharing pattern that requires it.
+
+---
+
 ## Error Types
 
 ### ConfigError
@@ -410,13 +476,14 @@ Signal handlers are installed eagerly in `init_shutdown()`, not deferred to `wai
 
 ### Top-level Error
 
-`src/error.rs` — 4 variants, `#[non_exhaustive]`:
+`src/error.rs` — 5 variants, `#[non_exhaustive]`:
 
 | Variant | Meaning |
 |---------|---------|
 | `Config(ConfigError)` | Wraps any config error (with `#[from]` for `?` conversion) |
 | `Logging(LoggingError)` | Wraps any logging error (cfg-gated behind `logging` feature) |
 | `Shutdown(ShutdownError)` | Wraps any shutdown error (cfg-gated behind `shutdown` feature) |
+| `Http(HttpError)` | Wraps any HTTP error (cfg-gated behind `http` feature) |
 | `Sqlite(SqliteError)` | Wraps any sqlite error (cfg-gated behind `sqlite` feature) |
 
 ---
@@ -430,16 +497,18 @@ pub struct AppContext<C> {
     // Fields ordered for correct drop sequence (Rust drops in declaration order):
     config: C,                            // 1. pure data, no cleanup
     extensions: HashMap<...>,             // 2. user-provided, drop before subsystems
+    #[cfg(feature = "http")]
+    http: Option<Http>,                   // 3. unbinds port before shutdown runs cleanup hooks
     #[cfg(feature = "shutdown")]
-    shutdown: Option<Shutdown>,           // 3. run cleanup hooks while pool/logger are alive
+    shutdown: Option<Shutdown>,           // 4. run cleanup hooks while pool/logger are alive
     #[cfg(feature = "sqlite")]
-    sqlite_pool: Option<SqlitePool>,      // 4. close database connections
+    sqlite_pool: Option<SqlitePool>,      // 5. close database connections
     #[cfg(feature = "logging")]
-    log_guard: Option<WorkerGuard>,       // 5. LAST — flushes pending log writes
+    log_guard: Option<WorkerGuard>,       // 6. LAST — flushes pending log writes
 }
 ```
 
-`AppContext::config()` returns `&C` — zero-cost after build. `extension::<T>()` returns `Option<&T>` — looks up a type-keyed value registered via `with_extension()` on the builder. `shutdown()` returns `Option<&Shutdown>` — `None` when `with_shutdown()` was not called. `sqlite()` returns `Option<&SqlitePool>` — `None` when `with_sqlite()` was not called. Fields are ordered for correct drop sequence: extensions drop before subsystem handles, `shutdown` drops before `sqlite_pool` (cleanup hooks should run while the pool and logger are still alive), `sqlite_pool` drops before `log_guard` (so database shutdown logging is captured), and `log_guard` is last so it flushes pending writes after everything else drops.
+`AppContext::config()` returns `&C` — zero-cost after build. `extension::<T>()` returns `Option<&T>` — looks up a type-keyed value registered via `with_extension()` on the builder. `http()` returns `Option<&Http>` — `None` when `with_http()` was not called. `shutdown()` returns `Option<&Shutdown>` — `None` when `with_shutdown()` was not called. `sqlite()` returns `Option<&SqlitePool>` — `None` when `with_sqlite()` was not called. Fields are ordered for correct drop sequence: `http` drops before `shutdown` (unbinds port; after `serve()` returns the listener has been consumed so this is effectively a no-op), `shutdown` drops before `sqlite_pool` (cleanup hooks should run while the pool and logger are still alive), `sqlite_pool` drops before `log_guard` (so database shutdown logging is captured), and `log_guard` is last so it flushes pending writes after everything else drops.
 
 ### Type-State Builder
 
@@ -452,6 +521,8 @@ pub struct AppContextBuilder<Cfg, Async = SyncBuild> {
     extensions: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
     #[cfg(feature = "logging")]
     logging: Option<LoggingBuilder>,
+    #[cfg(feature = "http")]
+    http: Option<HttpBuilder>,
     #[cfg(feature = "sqlite")]
     sqlite: Option<SqliteBuilder>,
     #[cfg(feature = "shutdown")]
@@ -468,22 +539,22 @@ Two type-level dimensions:
 
 **Async requirements** — `SyncBuild` vs `AsyncBuild`:
 - `build_sync()` only exists on `SyncBuild`
-- `with_sqlite()` and `with_shutdown()` each transition from `SyncBuild` to `AsyncBuild`, removing `build_sync()` and requiring `build().await` instead
-- If already in `AsyncBuild` (from another async subsystem), `with_sqlite()` and `with_shutdown()` stay in `AsyncBuild`
+- `with_sqlite()`, `with_shutdown()`, and `with_http()` each transition from `SyncBuild` to `AsyncBuild`, removing `build_sync()` and requiring `build().await` instead
+- If already in `AsyncBuild` (from another async subsystem), `with_sqlite()`, `with_shutdown()`, and `with_http()` stay in `AsyncBuild`
 - `PhantomData<Async>` reserves the parameter with no layout cost
 - `AsyncBuild` is cfg-gated behind `#[cfg(feature = "_async")]` — an internal feature activated by any async subsystem (`sqlite` and `shutdown` both activate it)
 
 **SyncBuild → AsyncBuild transition** — `into_async()` is a private helper that centralizes field propagation during state transitions. Without it, every new async subsystem's `with_*()` method on `SyncBuild` would need to manually copy every field from every other subsystem — O(N×M) boilerplate. With `into_async()`, new subsystems add one field to this method instead of editing every other subsystem's transition.
 
-`build_sync()` returns `Result<AppContext<C>, Error>`. `build()` (async) also returns `Result<AppContext<C>, Error>`. Even with no subsystems registered, the signature is fallible — subsystems can fail to initialize, and feature-flag-dependent signatures are confusing. `build()` initializes subsystems in dependency order: logging first (so other subsystems can log during init), then shutdown, then database.
+`build_sync()` returns `Result<AppContext<C>, Error>`. `build()` (async) also returns `Result<AppContext<C>, Error>`. Even with no subsystems registered, the signature is fallible — subsystems can fail to initialize, and feature-flag-dependent signatures are confusing. `build()` initializes subsystems in hardcoded dependency order: logging first (so other subsystems can log during init), then shutdown, then HTTP (which needs the shutdown token), then database.
 
-**Subsystem registration** — `with_logging(LoggingBuilder)`, `with_sqlite(SqliteBuilder)`, `with_shutdown(ShutdownBuilder)`, and `with_extension(T: Send + Sync + 'static)` are available on all builder states (`NoConfig` and `Configured<C>`) via generic `impl<Cfg, A>` blocks. This lets users register subsystems and extensions before or after providing config. Fields are propagated through state transitions (`builder()` → `with_config()` → `build_sync()` / `build()`). Extensions use a type-map (`HashMap<TypeId, Box<dyn Any + Send + Sync>>`) — if the same type is registered twice, the last value wins.
+**Subsystem registration** — `with_logging(LoggingBuilder)`, `with_sqlite(SqliteBuilder)`, `with_shutdown(ShutdownBuilder)`, `with_http(HttpBuilder)`, and `with_extension(T: Send + Sync + 'static)` are available on all builder states (`NoConfig` and `Configured<C>`) via generic `impl<Cfg, A>` blocks. This lets users register subsystems and extensions before or after providing config. Fields are propagated through state transitions (`builder()` → `with_config()` → `build_sync()` / `build()`). Extensions use a type-map (`HashMap<TypeId, Box<dyn Any + Send + Sync>>`) — if the same type is registered twice, the last value wins.
 
 Marker types (`NoConfig`, `Configured<C>`, `SyncBuild`, `AsyncBuild`) are `pub` with `#[doc(hidden)]` — nameable for compiler error messages, hidden from generated docs. Standard Rust ecosystem convention for type-state markers.
 
 `AppContext` uses a manual `Debug` impl rather than `#[derive(Debug)]` — `WorkerGuard` does not implement `Debug`, so the derive would break. The `log_guard` field is rendered as `"<WorkerGuard>"` in Debug output; `shutdown` and `sqlite_pool` render as `true`/`false`. `AppContextBuilder` also uses a manual Debug impl that shows whether logging, sqlite, and shutdown are configured.
 
-Three `compile_fail` doc-tests verify type-state enforcement: (1) `AppContext::builder().build_sync()` does not compile without config, (2) `with_sqlite().build_sync()` does not compile (must use `build().await`), and (3) `with_shutdown().build_sync()` does not compile.
+Three `compile_fail` doc-tests verify type-state enforcement: (1) `AppContext::builder().build_sync()` does not compile without config, (2) `with_sqlite().build_sync()` does not compile (must use `build().await`), and (3) `with_shutdown().build_sync()` does not compile. A fourth `no_run` doc-test on the `Http` struct verifies the HTTP usage example compiles correctly.
 
 ### Teardown Contract
 
@@ -509,10 +580,11 @@ Three always-on crates, plus optional crates behind feature flags:
 | `flate2` | 1 | Gzip compression for rotated log files | `logging` |
 | `time` | 0.3 (formatting, macros, std) | UTC timestamps for rotated filenames | `logging` |
 | `sqlx` | 0.8 (sqlite, runtime-tokio) | SQLite database pool and migrations | `sqlite` |
-| `tokio` | 1 (signal, rt, time, macros) | Signal handling, async runtime, timeouts | `shutdown` |
+| `axum` | 0.8 (http1, tokio) | HTTP server lifecycle, `Router` type, graceful shutdown | `http` |
+| `tokio` | 1 (signal, rt, time, macros, net) | Signal handling, async runtime, timeouts, TCP listener | `shutdown` |
 | `tokio-util` | 0.7 (rt) | `CancellationToken` for cooperative shutdown | `shutdown` |
 
-The `_async` internal feature flag (activated by both `sqlite` and `shutdown`) gates the shared `AsyncBuild` scaffolding — `AsyncBuild` marker, `into_async()` helper, and `async fn build()`. The leading underscore signals "internal" — downstream crates must not activate it directly.
+The `_async` internal feature flag (activated by `sqlite`, `shutdown`, and `http`) gates the shared `AsyncBuild` scaffolding — `AsyncBuild` marker, `into_async()` helper, and `async fn build()`. The leading underscore signals "internal" — downstream crates must not activate it directly. The `http` feature implies `shutdown` (HTTP requires a cancellation token for graceful shutdown), so enabling `http` also activates `shutdown` and `_async`.
 
 Dev dependencies: `tempfile` (filesystem tests), `serial_test` (env-var test serialization), `toml` (integration tests for private-field configs), `tokio` (async test runtime for `#[tokio::test]`).
 
@@ -529,7 +601,7 @@ MSRV: Rust 1.81 — required for `impl Error for Arc<E>` (stabilized in 1.81), u
 - **Deserialization at build time** — The merged TOML table is deserialized once into `T`. After `build()`, config access is a plain struct field reference.
 - **Explicit error handling** — No panics in library code. All fallible operations return `Result`. All validation deferred to `entries()` for consistent error flow through `build()`.
 - **Compile-time safety** — The AppContext builder uses type-state to enforce that config is provided and async requirements are met. Invalid usage is rejected by the compiler, not at runtime.
-- **Minimal dependency surface** — Three always-on crates plus feature-gated optional crates (five behind `logging`, one behind `sqlite`, two behind `shutdown`), all widely used and stable.
+- **Minimal dependency surface** — Three always-on crates plus feature-gated optional crates (five behind `logging`, one behind `sqlite`, two behind `shutdown`, one behind `http`), all widely used and stable.
 
 ---
 

@@ -2,11 +2,12 @@
 
 Tests are inline (`#[cfg(test)]` modules in source files) plus integration tests in `tests/`.
 
-**No features: 95 unit + 25 integration + 4 doc-tests = 124 tests**
+**No features: 95 unit + 25 integration + 5 doc-tests = 125 tests**
+**With `http`: 150 unit + 49 integration + 6 doc-tests = 205 tests**
 **With `shutdown`: 124 unit + 37 integration + 5 doc-tests = 166 tests**
-**With `sqlite`: 121 unit + 40 integration + 4 doc-tests = 165 tests**
-**With `logging`: 149 unit + 35 integration + 4 doc-tests = 188 tests**
-**With `shutdown,sqlite,logging`: 208 unit + 62 integration + 5 doc-tests = 275 tests**
+**With `sqlite`: 125 unit + 40 integration + 5 doc-tests = 170 tests**
+**With `logging`: 149 unit + 35 integration + 5 doc-tests = 189 tests**
+**With `http,sqlite,logging`: 234 unit + 74 integration + 6 doc-tests = 314 tests**
 
 ---
 
@@ -366,6 +367,89 @@ End-to-end tests for logging integration with AppContext (`tests/logging_init.rs
 
 ---
 
+## Module: `http::config` (7 tests, feature: `http`)
+
+Tests for `HttpConfig` defaults, TOML deserialization, and address formatting.
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `defaults` | Default values | Host is `"0.0.0.0"`, port is `8080` |
+| `custom_values` | Custom config | Custom host and port set correctly |
+| `addr_string` | Address formatting | `addr_string()` returns `"{host}:{port}"` |
+| `deserialize_defaults` | TOML defaults | Empty TOML produces default config |
+| `deserialize_full` | Full TOML | Both fields specified in TOML; parsed correctly |
+| `clone` | Clone trait | Cloned config matches original |
+| `debug` | Debug trait | Debug output contains `"HttpConfig"` |
+
+---
+
+## Module: `http::builder` (7 tests, feature: `http`)
+
+Tests for `HttpBuilder` fluent API.
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `new_defaults` | Default alignment | `HttpBuilder::new()` matches default config (0.0.0.0:8080) |
+| `from_config_preserves_values` | Config bridge | `from_config()` + `into_config()` round-trips all fields |
+| `fluent_chain` | Builder methods | `host()` and `port()` modify config correctly |
+| `host_accepts_string_types` | Generic host | `host()` accepts both `&str` and `String` |
+| `clone` | Clone trait | Cloned builder produces matching config |
+| `debug` | Debug trait | Debug output contains `"HttpBuilder"` |
+| `default_trait` | Default impl | `HttpBuilder::default()` matches `HttpBuilder::new()` |
+
+---
+
+## Module: `http::error` (7 tests, feature: `http`)
+
+Tests for `HttpError` display output and error source chains.
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `bind_failed_display` | Display output | `BindFailed` displays `"failed to bind to {addr}"`; has source |
+| `bind_failed_source_chain` | Source chain | `BindFailed` source returns the inner I/O error |
+| `already_serving_display` | Display output | `AlreadyServing` displays correct message; no source |
+| `shutdown_required_display` | Display output | `ShutdownRequired` displays correct message; no source |
+| `serve_failed_display` | Display output | `ServeFailed` displays `"HTTP server error"`; has source |
+| `debug` | Debug trait | Debug output contains variant name |
+| `top_level_error_from_http` | Error conversion | `HttpError` converts to top-level `Error` via `From` with `"http error:"` prefix |
+
+---
+
+## Module: `http::init` (5 tests, feature: `http`)
+
+Tests for `init_http()` and the `Http` handle.
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `init_binds_to_port_0` | Bind to ephemeral | Port 0 binds successfully, assigned port is non-zero |
+| `local_addr_available_before_serve` | Address access | `local_addr()` returns correct IP and non-zero port before `serve()` |
+| `serve_twice_returns_already_serving` | Double serve | Second `serve()` call returns `HttpError::AlreadyServing` |
+| `debug_output` | Debug trait | Debug output contains `"Http"`, `"local_addr"`, and `"listener: true"` |
+| `debug_after_serve` | Post-serve debug | After `serve()`, debug shows `"listener: false"` |
+
+---
+
+## Integration Tests: `http` (12 tests, feature: `http`)
+
+End-to-end tests for HTTP subsystem through the `AppContext` builder (`tests/http.rs`).
+
+| Test | Coverage | Behavior Verified |
+|------|----------|-------------------|
+| `appcontext_with_http` | Build with HTTP | `ctx.http()` returns `Some`, `ctx.shutdown()` returns `Some` |
+| `appcontext_without_http` | Build without HTTP | Feature enabled but `with_http()` not called — `ctx.http()` returns `None` |
+| `bind_to_port_0_assigns_port` | Ephemeral port | Port 0 assigns a real port; IP matches configured host |
+| `bind_failure` | Bind collision | Binding to an already-used port returns `HttpError::BindFailed` |
+| `missing_shutdown_returns_error` | Missing dependency | `with_http()` without `with_shutdown()` returns `HttpError::ShutdownRequired` |
+| `serve_and_shutdown` | Serve lifecycle | Trigger shutdown then serve — `serve()` returns `Ok(())` |
+| `serve_twice_returns_already_serving` | Double serve | Second `serve()` call returns `HttpError::AlreadyServing` |
+| `config_deserialization` | TOML config | `HttpConfig` deserializes from TOML and bridges to builder |
+| `context_debug_with_http` | Context debug | `AppContext` debug includes `"http: true"` and `"shutdown: true"` |
+| `builder_debug_with_http` | Builder debug | `AppContextBuilder` debug includes `"http: true"` and `"shutdown: true"` |
+| `serve_with_router_and_programmatic_shutdown` | Full e2e | Spawn serve, connect via TCP, trigger shutdown, verify serve returns Ok |
+| `local_addr_stable_after_serve` | Address stability | `local_addr()` returns same address before and after `serve()` |
+
+---
+
 ## Module: `sqlite::error` (4 tests, feature: `sqlite`)
 
 Tests for `SqliteError` display output and conversion to top-level `Error`.
@@ -497,13 +581,15 @@ Tests for the type-state `AppContext` builder and extension slot (`tests/context
 
 ---
 
-## Doc-Tests (4 tests)
+## Doc-Tests (6 tests)
 
 | Test | Coverage | Behavior Verified |
 |------|----------|-------------------|
 | `AppContext` usage example | `no_run` compile check | Usage example compiles correctly |
 | `AppContext` compile_fail (no config) | Type-state enforcement | `AppContext::builder().build_sync()` without `with_config()` does not compile |
-| `AppContext` compile_fail (async) | Type-state enforcement | `with_sqlite().build_sync()` does not compile — must use `build().await` |
+| `AppContext` compile_fail (sqlite async) | Type-state enforcement | `with_sqlite().build_sync()` does not compile — must use `build().await` |
+| `AppContext` compile_fail (shutdown async) | Type-state enforcement | `with_shutdown().build_sync()` does not compile — must use `build().await` |
+| `Http` usage example | `no_run` compile check | HTTP usage example with serve and shutdown compiles correctly |
 | `SerdeSource` priority example | `no_run` compile check | Usage example with multi-source priority compiles correctly |
 
 ---
@@ -528,6 +614,11 @@ Tests for the type-state `AppContext` builder and extension slot (`tests/context
 - `SqliteBuilder` - constructor, config round-trip, full fluent chain, generic path types, memory database
 - `init_pool()` - memory and file pools, PRAGMA verification (foreign_keys, busy_timeout), directory creation, migrations, empty path rejection
 - `SqliteError` - display output for all testable variants, source chain, top-level Error conversion
+- `HttpConfig` - defaults, TOML deserialization, address formatting, clone, debug
+- `HttpBuilder` - defaults, config round-trip, fluent chain, generic host types, clone, debug, Default trait
+- `HttpError` - display output for all variants, source chains, top-level Error conversion
+- `Http` handle - bind to ephemeral port, local_addr before serve, double-serve rejection, debug output
+- `AppContext` HTTP path - build with/without http, bind failure, missing shutdown, serve lifecycle, config deserialization, debug, full e2e with TCP connect, address stability
 - `AppContext` async path - config+sqlite builder chain, registration ordering, extensions with async, debug output, compile-time `build_sync()` prevention
 
 ### Partially Covered
